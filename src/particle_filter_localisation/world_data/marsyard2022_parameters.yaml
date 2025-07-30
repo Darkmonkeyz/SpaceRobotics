@@ -1,0 +1,5 @@
+# Parameters about marsyard map common to particle_filter_localisation and visual_terrain_sensor nodes
+/**:
+  ros__parameters:
+    resolution: 0.04
+    origin: [-5.14, -5.14, 0.0]
