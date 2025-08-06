@@ -119,19 +119,6 @@ Visualization Manager:
       Use Fixed Frame: true
       Use rainbow: true
       Value: true
-    - Class: rviz_default_plugins/Marker
-      Enabled: true
-      Name: Markers
-      Namespaces:
-        ns3: true
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        Filter size: 10
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /marker
-      Value: true
     - Angle Tolerance: 0.10000000149011612
       Class: rviz_default_plugins/Odometry
       Covariance:
@@ -212,6 +199,32 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /particles
       Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: MarkerArray
+      Namespaces:
+        ns2: true
+        ns3: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /marker
+      Value: true
+    - Class: rviz_default_plugins/Marker
+      Enabled: true
+      Name: Marker
+      Namespaces:
+        laser: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /marker_laser
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -289,5 +302,5 @@ Window Geometry:
   Views:
     collapsed: true
   Width: 1200
-  X: 67
+  X: 94
   Y: 60

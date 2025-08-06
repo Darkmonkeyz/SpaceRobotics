@@ -288,6 +288,14 @@ class ParticleFilter(Node):
         ####################
         point_x = clicked_point_msg.point.x
         point_y = clicked_point_msg.point.y
+        
+        for i in range(self.num_particles_):
+            x = np.random.normal(point_x, self.clicked_point_std_dev_)
+            y = np.random.normal(point_y, self.clicked_point_std_dev_)
+            theta = random_uniform(0, math.pi*2)
+            weight = 1.0/self.num_particles_
+            particle = Particle(x, y, theta, weight)
+            self.particles_.append(particle)
 
         
 
@@ -305,13 +313,22 @@ class ParticleFilter(Node):
     def normalise_weights(self):
         """Normalise the weights of the particles in self.particles_"""
 
-        pass
-
         ####################
         ## YOUR CODE HERE ##
         ## Task 2         ##
         ####################
-
+        tempParticles_ = []
+        currentSize = len(self.particles_)
+        for particle in self.particles_:
+            weight = 1/currentSize
+            theta = particle.theta
+            x = particle.x
+            y = particle.y
+            tempParticles_.append(Particle(x,y,theta,weight))
+        self.particles_ = tempParticles_       
+            
+            
+            
 
 
         
@@ -553,7 +570,15 @@ class ParticleFilter(Node):
         ## YOUR CODE HERE ##
         ## Task 4         ##
         ####################
-
+        tempParticles_ = []
+        for particle in self.particles_:
+            pweight = particle.weight
+            
+            particle.x = particle.x + (distance + self.motion_distance_noise_stddev_) * math.cos(particle.theta)
+            particle.y = particle.y + (distance + self.motion_distance_noise_stddev_) * math.sin(particle.theta)
+            particle.theta = wrap_angle(particle.theta + rotation + self.motion_rotation_noise_stddev_) 
+            #tempParticles_.append(Particle(px,py,ptheta,pweight))
+        #self.particles_ = tempParticles_    
 
 
 
