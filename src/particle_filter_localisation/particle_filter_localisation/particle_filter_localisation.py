@@ -319,13 +319,16 @@ class ParticleFilter(Node):
         ####################
         tempParticles_ = []
         currentSize = len(self.particles_)
-        for particle in self.particles_:
-            weight = 1/currentSize
-            theta = particle.theta
-            x = particle.x
-            y = particle.y
-            tempParticles_.append(Particle(x,y,theta,weight))
-        self.particles_ = tempParticles_       
+        total_weight = sum(particle.weight for particle in self.particles_)
+        if total_weight == 0:
+            
+            uniform_weight = 1.0 / len(self.particles_)
+            for particle in self.particles_:
+                particle.weight = uniform_weight
+        else:
+            
+            for particle in self.particles_:
+                particle.weight /= total_weight 
             
             
             
@@ -385,9 +388,29 @@ class ParticleFilter(Node):
         ## YOUR CODE HERE ##
         ## Task 6         ##
         ####################
-        # estimated_pose_x = ??
-        # estimated_pose_y = ??
-        # estimated_pose_theta = ??
+        xTotal = 0
+        yTotal = 0
+        thetaX = 0
+        thetaY = 0
+        totalWeight = 0
+        for p in self.particles_:
+            xTotal += p.x*p.weight
+            yTotal += p.y*p.weight
+            thetaX += math.cos(p.theta)*p.weight
+            thetaY += math.sin(p.theta)*p.weight
+            totalWeight += p.weight
+        xTotal /= totalWeight
+        yTotal /= totalWeight
+        thetaX /= totalWeight
+        thetaY /= totalWeight
+        avgTheta = math.atan2(thetaY, thetaX)
+        
+            
+        
+                
+        estimated_pose_x = xTotal
+        estimated_pose_y = yTotal
+        estimated_pose_theta = avgTheta
 
 
 
@@ -574,9 +597,9 @@ class ParticleFilter(Node):
         for particle in self.particles_:
             pweight = particle.weight
             
-            particle.x = particle.x + (distance + self.motion_distance_noise_stddev_) * math.cos(particle.theta)
-            particle.y = particle.y + (distance + self.motion_distance_noise_stddev_) * math.sin(particle.theta)
-            particle.theta = wrap_angle(particle.theta + rotation + self.motion_rotation_noise_stddev_) 
+            particle.x = particle.x + (distance + random_normal(self.motion_distance_noise_stddev_)) * math.cos(particle.theta)
+            particle.y = particle.y + (distance + random_normal(self.motion_distance_noise_stddev_)) * math.sin(particle.theta)
+            particle.theta = wrap_angle(particle.theta + rotation + random_normal(self.motion_rotation_noise_stddev_)) 
             #tempParticles_.append(Particle(px,py,ptheta,pweight))
         #self.particles_ = tempParticles_    
 
@@ -660,7 +683,7 @@ class ParticleFilter(Node):
 
             # For each particle
             for p in self.particles_:
-
+                
                 # Compute the likelihood of making the received observation, 
                 # assuming that this particle is at the correct location
                 # Intuitively: If the received observation has a high likelihood of matching the 
@@ -670,8 +693,13 @@ class ParticleFilter(Node):
                 ## YOUR CODE HERE ##
                 ## Task 5         ##
                 ####################
-                likelihood = 1.0
-
+                particleterrain = self.visual_terrain_map_.get_ground_truth(p.x, p.y)
+                if terrain_msg.data == particleterrain:
+                    likelihood = 0.9
+                    #print("Terrain msg is ",terrain_msg.data, "partile msg is ",particleterrain)
+                else:
+                    likelihood = 0.02
+                    
 
 
 
@@ -704,6 +732,8 @@ class ParticleFilter(Node):
 
             # For each particle
             first_particle = True
+            
+            calcConstant = 1/(math.sqrt(2*math.pi*self.sensing_noise_stddev_*self.sensing_noise_stddev_))
             for p in self.particles_:
         
                 # The likelihood of the particle is the product of the likelihood of each ray
@@ -732,6 +762,10 @@ class ParticleFilter(Node):
                     ## Task 7         ##
                     ####################
                     # likelihood = ??
+                    likelihood *= math.exp(-(math.pow((particle_range - scan_range),2))/(2*math.pow(self.sensing_noise_stddev_,2)) )*calcConstant
+                    
+                    
+                    
 
 
 
@@ -805,9 +839,13 @@ class ParticleFilter(Node):
         ## YOUR CODE HERE ##
         ## Task 8         ##
         ####################
-
+        compassRead = self.compass_
+        for p in self.particles_:
+            delta = wrap_angle(p.theta - compassRead)
+            likelihood = math.exp(-0.5 * (delta*delta)/(math.pow(self.magnetometer_noise_stddev_,2)))
+            p.theta = wrap_angle(compassRead + random_normal(self.magnetometer_noise_stddev_))
         
-
+        
 
 
 

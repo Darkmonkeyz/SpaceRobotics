@@ -81,7 +81,7 @@ def generate_launch_description():
                      'filename_class_colour_map': marsyard_path+'_class_coloured.bmp',
                      'use_terrain': True,
                      'use_laser': True,
-                     'use_compass': False},
+                     'use_compass': True},
                      marsyard_path+'_parameters.yaml'])
     
     ld.add_action(stage_node)

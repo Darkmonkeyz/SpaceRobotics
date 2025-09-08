@@ -1,0 +1,31 @@
+graph_search_controller_node:
+  ros__parameters:
+    # visuals
+    visualisation_rate: 50
+
+    # Problem variations
+    use_energy_costs: false
+    show_connectivity: false
+
+    # Graph construction parameters
+    use_prm: false
+    grid_step_size: 20
+    prm_num_nodes: 400
+    prm_max_edge_length: 100
+    do_distance_transform: false
+    use_distance_transform_graph: false # if this it true, also set do_distance_transform to true
+
+    # A* search parameters
+    use_naive_planner: false
+    heuristic_weight: 1.0
+
+    # Smoothing parameters
+    alpha: 0.1
+    beta: 0.5
+
+    # Initial start position and goal position. Subsequent goals set as rviz Publish Point clicks 
+    # Good for Mars environment
+    startx: 220
+    starty: 770
+    goalx: 520
+    goaly: 600
