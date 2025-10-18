@@ -61,24 +61,7 @@ class GraphSearch:
             else:
                 current = bestNeighbour
                 path.append(current)
-        
-            
-            
-            
-            
-
-
-
-
-
-
-
-
-
-
-
-
-            
+                   
         self.parent_logger_.info('Goal found!')
         return path
 
@@ -269,7 +252,7 @@ class GraphSearch:
         
         return path
 
-    def find_connected_nodes(self, start_idx):
+    def find_connected_nodes(self):  #my implementation doesnt even require a start index  #, start_idx
         """
         Return a list of all nodes that are reachable from start_idx node
         
@@ -279,101 +262,138 @@ class GraphSearch:
         Hint 2: Can we use A* heuristic if there's no goal?
         """
 
-        ####################
+        ####################  Yeah marker or maker i didnt like your implementation of this tbh. If the task is to find every connected node group i think its stupid to have to call this function multiple times AND calculate costs for something which should really just spread through each node, run out of nodes and get a new "start point". Especially if we arent ever doing path planning with this setting on.
         ## YOUR CODE HERE ##
         ## Task 8         ##
         ####################
-
-        # Set all parents and costs to zero
+        
+        
+        
+        unvisited_set = []
+        visited_set = []
+        nodeGroups = [0]*len(self.graph_.nodes_)#where the node index corresponds to the nodeGroups index and the value inside is a colour group (starting at 1).
+        colourGroup = 1
         for n in self.graph_.nodes_:
             n.cost_to_node = 9999999 # a large number
             n.cost_to_node_to_goal_heuristic = 999999999 # a large number
             n.parent_node = None # invalid to begin with
-
-        # Setup sets
-        unvisited_set = []
-        visited_set = []
-
-        # Add start node to visited set
-        unvisited_set.append(start_idx)
-        self.graph_.nodes_[start_idx].cost_to_node = 0
-        self.graph_.nodes_[start_idx].cost_to_node_to_goal_heuristic = 0
-
-        # Loop until solution found
-        while len(unvisited_set) > 0:
-
-            # Select a node
-            # hint: self.get_minimum_cost_node(unvisited_set) will help you find the node with the minimum cost
-
-            #########################
-            ## YOUR CODE GOES HERE ##
-            #########################
-
-
-
-            # Move the node to the visited set
-
-
-
-
-            # For each neighbour of the node
-            for neighbour_idx in range(len(self.graph_.nodes_[node_idx].neighbours)):
-
+        
+        for start_idx in range(len(self.graph_.nodes_)):
+            if not start_idx in visited_set:
+                unvisited_set.append(start_idx)
+                while len(unvisited_set) > 0:
+                    node_idx = unvisited_set[0]
+                    visited_set.append(node_idx)
+                    unvisited_set.remove(node_idx)
+                    nodeGroups[node_idx] = colourGroup
+                    for neighbour_idx in range(len(self.graph_.nodes_[node_idx].neighbours)):
                 # For convenience, extract the neighbour and the edge cost from the arrays
-                neighbour = self.graph_.nodes_[node_idx].neighbours[neighbour_idx]
-                neighbour_cost = self.graph_.nodes_[node_idx].neighbour_costs[neighbour_idx]
-
-                # Check if neighbours is already in visited
-                if neighbour.idx in visited_set:
-                    
-                    # Do nothing
-                    pass
+                        neighbour = self.graph_.nodes_[node_idx].neighbours[neighbour_idx]
+                        if neighbour.idx in visited_set:
+                            #Do nothing
+                            pass
                 
-                else:
+                        else:
+                            if neighbour.idx in unvisited_set:
+                                pass
+                            else:
+                                unvisited_set.append(neighbour.idx)
+                colourGroup += 1
+        
+        return nodeGroups
+        # # Set all parents and costs to zero
+        # for n in self.graph_.nodes_:
+        #     n.cost_to_node = 9999999 # a large number
+        #     n.cost_to_node_to_goal_heuristic = 999999999 # a large number
+        #     n.parent_node = None # invalid to begin with
 
-                    # Compute the cost of this neighbour node
+        # # Setup sets
+        # unvisited_set = []
+        # visited_set = []
+
+        # # Add start node to visited set
+        # unvisited_set.append(start_idx)
+        # self.graph_.nodes_[start_idx].cost_to_node = 0
+        # self.graph_.nodes_[start_idx].cost_to_node_to_goal_heuristic = 0
+
+        # # Loop until solution found
+        # while len(unvisited_set) > 0:
+
+        #     # Select a node
+        #     # hint: self.get_minimum_cost_node(unvisited_set) will help you find the node with the minimum cost
+
+        #     #########################
+        #     ## YOUR CODE GOES HERE ##
+        #     #########################
+
+
+
+        #     # Move the node to the visited set
+        #     node_idx = self.get_minimum_cost_node(unvisited_set)
+
+        #     visited_set.append(node_idx)
+        #     unvisited_set.remove(node_idx)
+
+
+
+        #     # For each neighbour of the node
+        #     for neighbour_idx in range(len(self.graph_.nodes_[node_idx].neighbours)):
+
+        #         # For convenience, extract the neighbour and the edge cost from the arrays
+        #         neighbour = self.graph_.nodes_[node_idx].neighbours[neighbour_idx]
+        #         neighbour_cost = self.graph_.nodes_[node_idx].neighbour_costs[neighbour_idx]
+
+        #         # Check if neighbours is already in visited
+        #         if neighbour.idx in visited_set:
                     
-                    ##########################
-                    ## YOUR CODE GOES HERE  ##
-                    ##########################
+        #             # Do nothing
+        #             pass
+                
+        #         else:
+
+        #             # Compute the cost of this neighbour node
+                    
+        #             ##########################
+        #             ## YOUR CODE GOES HERE  ##
+        #             ##########################
                     
                     
 
 
-                    # Check if neighbours is already in unvisited
-                    if neighbour.idx in unvisited_set:
+        #             # Check if neighbours is already in unvisited
+        #             if neighbour.idx in unvisited_set:
 
-                        pass # you can remove this line after you've completed the following
+        #                 pass # you can remove this line after you've completed the following
 
-                        # If the cost is lower than the previous cost for this node
-                        # Then update it to the new cost
-                        # Also, update the parent pointer to point to the new parent 
+        #                 # If the cost is lower than the previous cost for this node
+        #                 # Then update it to the new cost
+        #                 # Also, update the parent pointer to point to the new parent 
 
-                        ##########################
-                        ## YOUR CODE GOES HERE  ##
-                        ## FIX THE ?? BELOW     ##
-                        ##########################
-                        # if ??:
-                        #     neighbour.parent_node = ??
-                        #     neighbour.cost_to_node = ??
+        #                 ##########################
+        #                 ## YOUR CODE GOES HERE  ##
+        #                 ## FIX THE ?? BELOW     ##
+        #                 ##########################
+        #                 # if ??:
+        #                 #     neighbour.parent_node = ??
+        #                 #     neighbour.cost_to_node = ??
 
                         
 
-                    else:
+        #             else:
 
-                        # Add it to the unvisited set
-                        unvisited_set.append(neighbour.idx)
+        #                 # Add it to the unvisited set
+        #                 unvisited_set.append(neighbour.idx)
 
-                        # Initialise the cost and the parent pointer
-                        # hint: this will be similar to your answer above
+        #                 # Initialise the cost and the parent pointer
+        #                 # hint: this will be similar to your answer above
 
-                        ##########################
-                        ## YOUR CODE GOES HERE  ##
-                        ## FIX THE ?? BELOW     ##
-                        ##########################
-                        # neighbour.parent_node = ??
-                        # neighbour.cost_to_node = ??
+        #                 ##########################
+        #                 ## YOUR CODE GOES HERE  ##
+        #                 ## FIX THE ?? BELOW     ##
+        #                 ##########################
+        #                 # neighbour.parent_node = ??
+        #                 # neighbour.cost_to_node = ??
 
                         
         
-        return visited_set
+        # return visited_set

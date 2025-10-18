@@ -73,7 +73,30 @@ class Map:
         ## YOUR CODE HERE ##
         ## Task 9         ##
         ####################
-
+        for i in range(1, rows-1):
+            if (i % 15 == 0):
+                percentage = i/rows
+                self.parent_logger_.warn(f'First pass at {percentage}%')
+                
+            
+            for j in range(1, cols-1):
+                if self.obstacle_map_[i, j] == 1:
+                    self.distance_transform_map_[i,j] = 0
+                else:
+                    self.distance_transform_map_[i,j] = min(self.distance_transform_map_[i-1,j] + 1, self.distance_transform_map_[i,j-1] + 1)
+        
+        for i in range(rows-1, 1, -1):
+            if (i % 15 == 0):
+                percentage = i/rows
+                self.parent_logger_.warn(f'second pass at {percentage}%')            
+            for j in range(cols-1, 1, -1):
+                if self.obstacle_map_[i, j] == 1:
+                    self.distance_transform_map_[i,j] = 0
+                else:
+                    self.distance_transform_map_[i,j] = min(self.distance_transform_map_[i+1,j] + 1, self.distance_transform_map_[i,j+1] + 1, self.distance_transform_map_[i,j])
+                    
+            
+                    
         
 
 

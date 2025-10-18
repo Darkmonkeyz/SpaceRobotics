@@ -58,10 +58,10 @@ class PathSmoother():
                 newPath[i].x = newPath[i].x - (self.alpha_ + 2* self.beta_)*newPath[i].x + self.alpha_*path[i].x + self.beta_*(newPath[i-1].x + newPath[i+1].x)
                 #self.parent_node_.get_logger().info(f'newx = {newPath[i].x} oldx = {previousPath[i].x}')
                 newPath[i].y = newPath[i].y - (self.alpha_ + 2* self.beta_)*newPath[i].y + self.alpha_*path[i].y + self.beta_*(newPath[i-1].y + newPath[i+1].y)
+                if is_occluded(self.graph_.map_.obstacle_map_, [newPath[i-1].x, newPath[i-1].y], [newPath[i].x, newPath[i].y]) or is_occluded(self.graph_.map_.obstacle_map_, [newPath[i].x, newPath[i].y], [newPath[i+1].x, newPath[i+1].y]):
+                    newPath[i].x = previousPath[i].x
+                    newPath[i].y = previousPath[i].y
             
-            for i in range(len(path)-1):
-               if is_occluded(self.graph_.map_.obstacle_map_, [newPath[i].x, newPath[i].y], [newPath[i+1].x, newPath[i+1].y]):
-                    newPath = copy.deepcopy(previousPath)
             
             #self.parent_node_.get_logger().info(f'sumDistance = {self.sumEuclidianDistance(previousPath, newPath)}')
             

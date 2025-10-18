@@ -6,3 +6,7 @@ __pycache__/
 .vscode/
 .DS_Store
 src/particle_filter_localisation/world_data/
+src/cave_explorer/worlds/
+src/cave_explorer/urdf/
+rosbag2_2025_10_17-23_25_50/rosbag2_2025_10_17-23_25_50_0.db3
+rosbag2_2025_10_17-23_25_50/metadata.yaml

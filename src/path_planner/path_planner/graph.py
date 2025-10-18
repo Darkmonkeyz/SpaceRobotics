@@ -192,8 +192,15 @@ class Graph:
                                 ## YOUR CODE HERE ##
                                 ## TASK 6         ##
                                 ####################
-                                energy_cost = distance # Comment this out once you've done this Task
-                                # energy_cost = ??
+                                #energy_cost = distance # Comment this out once you've done this Task
+                                mu = 0.1
+                                m = 1025
+                                g = 3.71
+                                [i_x, i_y, i_z] = self.map_.pixel_to_world(node_i.x, node_i.y)
+                                [j_x, j_y, j_z] = self.map_.pixel_to_world(node_j.x, node_j.y)
+                                dx = math.sqrt((i_x - j_x)**2 + (i_y - j_y)**2 + (i_z - j_z)**2)
+                                theta = math.atan((j_z-i_z)/(math.sqrt((i_x - j_x)**2 + (i_y - j_y)**2)))
+                                energy_cost = np.absolute((mu*m*g*math.cos(theta)  + m*g*math.sin(theta))*dx)
                                 
 
 
@@ -231,10 +238,28 @@ class Graph:
         ## YOUR CODE HERE ##
         ## Task 7         ##
         ####################
+        
+        # idx = 0
+        # for x in range(self.map_.min_x_, self.map_.max_x_-1, grid_step_size):
+        #     for y in range(self.map_.min_y_, self.map_.max_y_-1, grid_step_size):
 
-        # while len(self.nodes_) < num_nodes:
+        #         # Check if it is occupied
+        #         occupied = self.map_.is_occupied(x,y)
+
+        #         # Create the node
+        #         if not occupied:
+        #             self.nodes_.append(Node(x,y,idx))
+        #             idx = idx + 1
+
+        while len(self.nodes_) < num_nodes:
         #   ??
-
+            x = int(np.round(random.uniform(self.map_.min_x_, self.map_.max_x_),0))
+            y = int(np.round(random.uniform(self.map_.min_y_, self.map_.max_y_),0))
+            occupied = self.map_.is_occupied(x,y)
+                 # Create the node
+            if not occupied:
+                self.nodes_.append(Node(x,y,idx))
+                idx = idx + 1
 
 
 
@@ -267,9 +292,14 @@ class Graph:
                                 ## YOUR CODE HERE         ##
                                 ## TASK 6 -- after TASK 7 ##
                                 ############################
-                                energy_cost = distance # Comment this out once you've done this Task
-                                # energy_cost = ??
-                                
+                                mu = 0.1
+                                m = 1025
+                                g = 3.71
+                                [i_x, i_y, i_z] = self.map_.pixel_to_world(node_i.x, node_i.y)
+                                [j_x, j_y, j_z] = self.map_.pixel_to_world(node_j.x, node_j.y)
+                                dx = math.sqrt((i_x - j_x)**2 + (i_y - j_y)**2 + (i_z - j_z)**2)
+                                theta = math.atan((j_z-i_z)/(math.sqrt((i_x - j_x)**2 + (i_y - j_y)**2)))
+                                energy_cost = np.absolute((mu*m*g*math.cos(theta)  + m*g*math.sin(theta))*dx)
 
 
 
@@ -306,7 +336,38 @@ class Graph:
         ## Task 10        ##
         ####################
         distance_transform_map = self.map_.distance_transform_map_
+        
+        
+        closenessVariable = 0.99
 
+        while len(self.nodes_) < num_nodes:
+        #   ??
+            x = int(np.round(random.uniform(self.map_.min_x_, self.map_.max_x_),0))
+            y = int(np.round(random.uniform(self.map_.min_y_, self.map_.max_y_),0))
+            occupied = self.map_.is_occupied(x,y)
+                 # Create the node
+                    
+                 
+            if not occupied:
+                
+                #averageOfDistances = 0
+                numberOfGoods = 0
+                numberOfSamples = 0     
+                for i in range(-3, 4):
+                    for j in range(-3,4):
+                        occupied = self.map_.is_occupied(x+i,y+j)
+                        #self.parent_logger_.info(f'{distance_transform_map.shape[0]} shapesizes {distance_transform_map.shape[1]}')
+                        if x+i > 0 and y+j > 0 and x+i < distance_transform_map.shape[0] and y+j < distance_transform_map.shape[1] and not occupied:
+                            #self.parent_logger_.info(f'{distance_transform_map.shape[0]} shapesizesSuccess {distance_transform_map.shape[1]}')
+                            #averageOfDistances += distance_transform_map[x+i,y+j]
+                            if distance_transform_map[x,y] > distance_transform_map[x+i,y+j]:
+                                numberOfGoods += 1
+                            #self.parent_logger_.info(f'{numberOfSamples} samples {distance_transform_map.shape[1]}')
+                            numberOfSamples += 1
+                #averageOfDistances /= numberOfSamples
+                if numberOfGoods > numberOfSamples*0.7:
+                    self.nodes_.append(Node(x,y,idx))
+                    idx = idx + 1
 
 
 
@@ -351,8 +412,14 @@ class Graph:
                                 ## YOUR CODE HERE         ##
                                 ## TASK 6 -- after TASK 10##
                                 ############################
-                                energy_cost = distance # Comment this out once you've done this Task
-                                # energy_cost = ??
+                                mu = 0.1
+                                m = 1025
+                                g = 3.71
+                                [i_x, i_y, i_z] = self.map_.pixel_to_world(node_i.x, node_i.y)
+                                [j_x, j_y, j_z] = self.map_.pixel_to_world(node_j.x, node_j.y)
+                                dx = math.sqrt((i_x - j_x)**2 + (i_y - j_y)**2 + (i_z - j_z)**2)
+                                theta = math.atan((j_z-i_z)/(math.sqrt((i_x - j_x)**2 + (i_y - j_y)**2)))
+                                energy_cost = np.absolute((mu*m*g*math.cos(theta)  + m*g*math.sin(theta))*dx)
                                 
 
 
@@ -422,7 +489,7 @@ class Graph:
         graph_search = GraphSearch(self.parent_logger_, self, False, 0.0)
 
         # Setup groups list. Initially put all nodes in group "0"
-        groups = [0]*len(self.nodes_)
+        #groups = [0]*len(self.nodes_)
 
         ####################
         ## YOUR CODE HERE ##
@@ -430,8 +497,9 @@ class Graph:
         ####################
 
         # Current group
-        group_number = 1
+        #group_number = 1 # bad implementation didnt like it.
 
+        groups = graph_search.find_connected_nodes()
 
 
 
