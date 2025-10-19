@@ -9,6 +9,9 @@ import torch
 from ultralytics import YOLO
 import rclpy
 from cv_bridge import CvBridge
+import numpy as np
+from scipy.ndimage import binary_dilation #for frontiers
+from sklearn.cluster import DBSCAN #for clustering frontiers
 from geometry_msgs.msg import Pose, Pose2D, PoseStamped, Point
 from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import OccupancyGrid
@@ -21,6 +24,7 @@ from tf2_ros.transform_listener import TransformListener
 
 from visualization_msgs.msg import Marker
 from visualization_msgs.msg import MarkerArray
+from std_msgs.msg import ColorRGBA
 
 
 def wrap_angle(angle):
@@ -54,7 +58,27 @@ class PlannerType(Enum):
     RANDOM_WALK = 4
     RANDOM_GOAL = 5
     # Add more!
+    SELECT_AND_GO_TO_FRONTIER = 6
+    CLOSERANGE_INSPECTION = 7
+    NOSCOPE360 = 8
+    
 
+class ArtifactType(Enum):
+    MUSHROOM = 0
+    ICECASTLE = 1
+    URANIUM = 2
+    HOWARD = 3
+    SNOWBALL = 4
+    
+    
+class MockFuture:  #useful only for my quick goal cancel logic
+        def __init__(self, success=True):
+            self._success = success
+        def result(self):
+            class Result:
+                result = type('r', (), {})()
+                result.result = NavigateToPose.Result()
+            return Result()
 
 class CaveExplorer(Node):
     def __init__(self):
@@ -66,6 +90,8 @@ class CaveExplorer(Node):
 
         # Variables/Flags for perception
         self.artifact_found_ = False
+
+        self.frontierClusters_ =[]
 
         # Variables/Flags for planning
         self.planner_type_ = PlannerType.ERROR
@@ -121,6 +147,9 @@ class CaveExplorer(Node):
         # Subscribe to the map topic to get current bounds
         self.map_sub_ = self.create_subscription(OccupancyGrid, 'map',  self.map_callback, 1)
 
+        self.frontier_pub = self.create_publisher(MarkerArray, "frontier_markers", 10) #frontierPublisher
+
+
         # Prepare image processing
         self.image_detections_pub_ = self.create_publisher(Image, 'detections_image', 1)
         self.declare_parameter('computer_vision_model_filename', rclpy.Parameter.Type.STRING)
@@ -173,6 +202,9 @@ class CaveExplorer(Node):
         map_height = map_msg.info.height
         map_width = map_msg.info.width
 
+        data = np.array(map_msg.data).reshape((map_height,  map_width)) #added to actually get map info
+        res = map_msg.info.resolution
+
         # Set current limits
         self.xlim_ = [map_origin[0], map_origin[0]+map_width*map_resolution]
         self.ylim_ = [map_origin[1], map_origin[1]+map_height*map_resolution]
@@ -180,6 +212,147 @@ class CaveExplorer(Node):
         # self.get_logger().warn('Map received:')
         # self.get_logger().warn(f'  xlim = [{self.xlim_[0]:.2f}, {self.xlim_[1]:.2f}]')
         # self.get_logger().warn(f'  ylim = [{self.ylim_[0]:.2f}, {self.ylim_[1]:.2f}]')
+
+        frontiers = self.detect_frontiers(data, res, map_origin)
+        #self.get_logger().warn(f"Detected {len(frontiers)} frontier points") #debugging step
+        frontierClusters = self.cluster_frontiers(frontiers)
+        self.publish_frontier_markers(frontierClusters)
+        self.frontierClusters_ = frontierClusters 
+
+
+    def detect_frontiers(self, data: np.ndarray, res: float, origin: list):
+        free_mask = data == 0
+        unknown_mask = data == -1
+
+        unknown_dilated = binary_dilation(unknown_mask, structure=np.ones((3, 3)))
+        frontier_mask = free_mask & unknown_dilated
+
+        ys, xs = np.where(frontier_mask)
+        
+        return np.array([
+            [origin[0] + x * res, origin[1] + y * res]
+            for x, y in zip(xs, ys)
+        ])
+    
+    
+
+    def cluster_frontiers(self, frontier_points, eps=0.7, min_samples=5):
+        if len(frontier_points) == 0:
+            return []
+
+        clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(frontier_points)
+        labels = clustering.labels_
+
+        clusters = []
+        for label in set(labels):
+            if label == -1:
+                continue
+            cluster_pts = frontier_points[labels == label]
+            centroid = np.mean(cluster_pts, axis=0)
+            clusters.append({
+                "id": label,
+                "points": cluster_pts,
+                "centroid": centroid
+            })
+        #self.get_logger().warn(f"Detected {len(clusters)} clusters")
+        return clusters
+    
+    def select_frontier_goal(self, clusters, robot_pose):
+        if not clusters:
+            return None
+        dists = [np.linalg.norm(cluster["centroid"] - np.array([robot_pose.x, robot_pose.y])) for cluster in clusters]
+        self.get_logger().warn(f"Selected cluster {clusters[np.argmin(dists)]['id']}")
+        return clusters[np.argmin(dists)]
+    
+    def planner_choose_and_go_to_frontier(self):
+        roboPose = self.get_pose_2d()
+        clusters = self.frontierClusters_
+
+        selectedCluster = self.select_frontier_goal(clusters, roboPose)
+        if selectedCluster != None:
+            goal_pose2d = Pose2D(
+            x = selectedCluster["centroid"][0],
+            y = selectedCluster["centroid"][1],
+            theta = math.pi/2
+        )
+        self.planner_go_to_pose2d(goal_pose2d)
+        
+
+        
+    
+
+    def publish_frontier_markers(self, clusters):
+        marker_array = MarkerArray()
+        now = self.get_clock().now().to_msg()
+
+        
+        delete_marker = Marker()
+        delete_marker.action = Marker.DELETEALL
+        marker_array.markers.append(delete_marker)
+
+        for cluster in clusters:
+            cluster_id = cluster["id"]
+            color = ColorRGBA(
+                r=random.random(),
+                g=random.random(),
+                b=random.random(),
+                a=0.8
+            )
+
+            
+            m = Marker()
+            m.header.frame_id = "map"
+            m.header.stamp = now
+            m.ns = "frontiers"
+            m.id = int(cluster_id)
+            m.type = Marker.POINTS
+            m.action = Marker.ADD
+            m.scale.x = 0.5  
+            m.scale.y = 0.5
+            m.color = color
+
+            m.points = [
+                Point(x=p[0], y=p[1], z=0.0)
+                for p in cluster["points"]
+            ]
+
+            marker_array.markers.append(m)
+
+            
+            c = Marker()
+            c.header.frame_id = "map"
+            c.header.stamp = now
+            c.ns = "centroids"
+            c.id = 1000 + int(cluster_id)
+            c.type = Marker.SPHERE
+            c.action = Marker.ADD
+            c.pose.position.x = cluster["centroid"][0]
+            c.pose.position.y = cluster["centroid"][1]
+            c.pose.position.z = 0.0
+            c.scale.x = 1.0
+            c.scale.y = 1.0
+            c.scale.z = 1.0
+            c.color = color
+            marker_array.markers.append(c)
+
+            
+            t = Marker()
+            t.header.frame_id = "map"
+            t.header.stamp = now
+            t.ns = "labels"
+            t.id = 2000 + int(cluster_id)
+            t.type = Marker.TEXT_VIEW_FACING
+            t.action = Marker.ADD
+            t.pose.position.x = cluster["centroid"][0]
+            t.pose.position.y = cluster["centroid"][1]
+            t.pose.position.z = 1.0
+            t.scale.z = 1.0
+            t.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=1.0)
+            t.text = f"Frontier {cluster_id}"
+            marker_array.markers.append(t)
+
+        self.frontier_pub.publish(marker_array)
+
     
     def image_callback(self, image_msg):
         """
@@ -228,33 +401,23 @@ class CaveExplorer(Node):
         #     self.get_logger().info('Artifact found!')
         #     self.localise_artifact()
 
-        # Convert ROS Image to OpenCV BGR
         image = self.cv_bridge_.imgmsg_to_cv2(image_msg, desired_encoding='bgr8')
 
-        # Run YOLO inference
-        results = self.computer_vision_model_.predict(
-            source=image,      # can pass NumPy image directly
-            imgsz=640,         # target size YOLOv8 expects
-            conf=0.5,          # confidence threshold
-            device='cpu',      # or 'cuda' if available
-            verbose=False,
-            save=False
-        )
+        results = self.computer_vision_model_.predict(source=image, imgsz=640, conf=0.5, device='cpu', verbose=False, save=False)
 
-        # results[0] contains detections for the first (and only) image
         detections = []
         for box in results[0].boxes.xyxy:  # x1, y1, x2, y2
             x1, y1, x2, y2 = map(int, box)
             detections.append((x1, y1, x2 - x1, y2 - y1))
 
-        # Set artifact_found_
+        
         self.artifact_found_ = len(detections) > 0
 
-        # Draw bounding boxes
+        
         for (x, y, w, h) in detections:
             cv2.rectangle(image, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
-        # Publish detection image
+        
         image_detection_message = self.cv_bridge_.cv2_to_imgmsg(image, encoding="bgr8")
         self.image_detections_pub_.publish(image_detection_message)
 
@@ -355,6 +518,33 @@ class CaveExplorer(Node):
         result = future.result().result
         self.get_logger().info(f'Goal reached!')
         self.ready_for_next_goal_ = True
+
+
+
+    #code to stop current goal. For behaviour switching.
+    def cancel_current_goal(self):
+        if hasattr(self, 'send_goal_future_') and self.send_goal_future_ is not None:
+            self.get_logger().warn("Cancelling current goal...")
+
+            cancel_future = self.nav2_action_client_.cancel_goal_async(self.get_result_future_._goal_handle)
+
+            cancel_future.add_done_callback(self._goal_cancelled_callback)
+        else:
+            self.get_logger().warn("No active goal to cancel.")
+
+    
+
+    def _goal_cancelled_callback(self, future):
+        cancel_response = future.result()
+        if len(cancel_response.goals_canceling) > 0:
+            self.get_logger().info("Goal successfully cancelled.")
+        else:
+            self.get_logger().warn("No goals were cancelled (maybe already done?).")
+
+        # Treat it as if goal was reached
+        self.goal_reached_callback(MockFuture(success=True))
+    
+    
 
 
     def planner_move_forwards(self, distance):
@@ -474,7 +664,7 @@ class CaveExplorer(Node):
         elif not self.returned_home_:
             self.planner_type_ = PlannerType.RETURN_HOME
         else:
-            self.planner_type_ = PlannerType.RANDOM_GOAL
+            self.planner_type_ = PlannerType.SELECT_AND_GO_TO_FRONTIER
 
         #######################################################
         # Execute the planner by calling the relevant method
@@ -490,6 +680,8 @@ class CaveExplorer(Node):
             self.planner_random_walk()
         elif self.planner_type_ == PlannerType.RANDOM_GOAL:
             self.planner_random_goal()
+        elif self.planner_type_ == PlannerType.SELECT_AND_GO_TO_FRONTIER:
+            self.planner_choose_and_go_to_frontier()
         else:
             self.get_logger().error('No valid planner selected')
             self.destroy_node()
