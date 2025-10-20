@@ -21,6 +21,7 @@ from sensor_msgs.msg import Image
 from tf2_ros import TransformException
 from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
+from scipy.spatial.transform import Rotation as R 
 
 from visualization_msgs.msg import Marker
 from visualization_msgs.msg import MarkerArray
@@ -69,6 +70,15 @@ class ArtifactType(Enum):
     URANIUM = 2
     HOWARD = 3
     SNOWBALL = 4
+
+ARTIFACT_HEIGHTS = { #height in meters from blender and mars_cave.sdf
+    ArtifactType.MUSHROOM: 2.03,
+    ArtifactType.ICECASTLE: 1.51,
+    ArtifactType.URANIUM: 2.84,
+    ArtifactType.HOWARD: 2.86,
+    ArtifactType.SNOWBALL: 1.6,
+}
+
     
     
 class MockFuture:  #useful only for my quick goal cancel logic
@@ -122,9 +132,34 @@ class CaveExplorer(Node):
         self.marker_artifacts_.color.b = 0.2
         self.marker_pub_ = self.create_publisher(MarkerArray, 'marker_array_artifacts', 10)
 
+        #very original code
+        self.rough_marker_artifacts_ = Marker()
+        self.rough_marker_artifacts_.header.frame_id = "map"
+        self.rough_marker_artifacts_.ns = "artifacts"
+        self.rough_marker_artifacts_.id = 0
+        self.rough_marker_artifacts_.type = Marker.SPHERE_LIST
+        self.rough_marker_artifacts_.action = Marker.ADD
+        self.rough_marker_artifacts_.pose.position.x = 0.0
+        self.rough_marker_artifacts_.pose.position.y = 0.0
+        self.rough_marker_artifacts_.pose.position.z = 0.0
+        self.rough_marker_artifacts_.pose.orientation.x = 0.0
+        self.rough_marker_artifacts_.pose.orientation.y = 0.0
+        self.rough_marker_artifacts_.pose.orientation.z = 0.0
+        self.rough_marker_artifacts_.pose.orientation.w = 1.0
+        self.rough_marker_artifacts_.scale.x = 1.5
+        self.rough_marker_artifacts_.scale.y = 1.5
+        self.rough_marker_artifacts_.scale.z = 1.5
+        self.rough_marker_artifacts_.color.a = 0.5
+        self.rough_marker_artifacts_.color.r = 1.0
+        self.rough_marker_artifacts_.color.g = 0.5
+        self.rough_marker_artifacts_.color.b = 0.2
+        self.rough_marker_pub_ = self.create_publisher(MarkerArray, 'rough_marker_array_artifacts', 10)
+
         # Remember the artifact locations
         # Array of type geometry_msgs.Point
         self.artifact_locations_ = []
+
+        self.rough_artifact_locations_ = []
 
         # Initialise CvBridge
         self.cv_bridge_ = CvBridge()
@@ -191,6 +226,38 @@ class CaveExplorer(Node):
         self.get_logger().warn(f'Pose: {pose}')
 
         return pose
+    
+    def get_pose_camera_2d(self):  #not useful maybe?
+        """Get the 2d pose of the robot camera"""
+
+        # Lookup the latest transform
+        try:
+            t = self.tf_buffer.lookup_transform(
+                'map',
+                'camera_rgb_optical_frame',
+                rclpy.time.Time())
+        except TransformException as ex:
+            self.get_logger().error(f'Could not transform: {ex}')
+            return
+
+        # Return a Pose2D message
+        pose = Pose2D()
+        pose.x = t.transform.translation.x
+        pose.y = t.transform.translation.y
+
+        qw = t.transform.rotation.w
+        qz = t.transform.rotation.z
+
+        if qz >= 0.:
+            pose.theta = wrap_angle(2. * math.acos(qw))
+        else: 
+            pose.theta = wrap_angle(-2. * math.acos(qw))
+
+        self.get_logger().warn(f'Camera Pose: {pose}')
+
+        return pose
+    
+    
 
     def map_callback(self, map_msg: OccupancyGrid):
         """New map received, so update x and y limits"""
@@ -229,32 +296,65 @@ class CaveExplorer(Node):
 
         ys, xs = np.where(frontier_mask)
         
-        return np.array([
-            [origin[0] + x * res, origin[1] + y * res]
-            for x, y in zip(xs, ys)
-        ])
+        return np.array([ [origin[0] + x * res, origin[1] + y * res] for x, y in zip(xs, ys) ])
     
     
 
-    def cluster_frontiers(self, frontier_points, eps=0.7, min_samples=5):
+    def cluster_frontiers(self, frontier_points):
+        # if len(frontier_points) == 0:
+        #     return []
+
+        # clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(frontier_points)
+        # labels = clustering.labels_
+
+        # clusters = []
+        # for label in set(labels):
+        #     if label == -1:
+        #         continue
+        #     cluster_pts = frontier_points[labels == label]
+        #     centroid = np.mean(cluster_pts, axis=0)
+        #     clusters.append({
+        #         "id": label,
+        #         "points": cluster_pts,
+        #         "centroid": centroid
+        #     })
+        # #self.get_logger().warn(f"Detected {len(clusters)} clusters")
+        # return clusters
+        neighbour_radius = 1
+        cutOff = 5
         if len(frontier_points) == 0:
             return []
 
-        clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(frontier_points)
-        labels = clustering.labels_
-
+        unvisited = set(range(len(frontier_points)))
         clusters = []
-        for label in set(labels):
-            if label == -1:
-                continue
-            cluster_pts = frontier_points[labels == label]
-            centroid = np.mean(cluster_pts, axis=0)
-            clusters.append({
-                "id": label,
-                "points": cluster_pts,
-                "centroid": centroid
-            })
-        #self.get_logger().warn(f"Detected {len(clusters)} clusters")
+
+        while unvisited:
+            idx = unvisited.pop()
+            cluster_indices = {idx}
+            stack = [idx]
+
+            while stack:
+                current_idx = stack.pop()
+                current_point = frontier_points[current_idx]
+
+                neighbors = []
+                for i in unvisited:
+                    if np.linalg.norm(current_point - frontier_points[i]) <= neighbour_radius:
+                        neighbors.append(i)
+
+                for n in neighbors:
+                    stack.append(n)
+                    cluster_indices.add(n)
+                    unvisited.remove(n)
+
+            cluster_pts = frontier_points[list(cluster_indices)]
+            if len(cluster_pts) > cutOff:
+                clusters.append({
+                    "points": cluster_pts,
+                    "centroid": np.mean(cluster_pts, axis=0),
+                    "id": len(clusters)
+                })
+
         return clusters
     
     def select_frontier_goal(self, clusters, robot_pose):
@@ -362,7 +462,7 @@ class CaveExplorer(Node):
         A simple method has been provided to begin with for detecting stop signs (which is not what we're actually looking for) 
         adapted from: https://www.geeksforgeeks.org/detect-an-object-with-opencv-python/
         """
-    
+        """ old code method
         # # Copy the image message to a cv image
         # # see http://wiki.ros.org/cv_bridge/Tutorials/ConvertingBetweenROSImagesAndOpenCVImagesPython
         # image = self.cv_bridge_.imgmsg_to_cv2(image_msg, desired_encoding='passthrough')
@@ -400,22 +500,34 @@ class CaveExplorer(Node):
         # if self.artifact_found_:
         #     self.get_logger().info('Artifact found!')
         #     self.localise_artifact()
+        """
 
         image = self.cv_bridge_.imgmsg_to_cv2(image_msg, desired_encoding='bgr8')
 
         results = self.computer_vision_model_.predict(source=image, imgsz=640, conf=0.5, device='cpu', verbose=False, save=False)
-
         detections = []
-        for box in results[0].boxes.xyxy:  # x1, y1, x2, y2
-            x1, y1, x2, y2 = map(int, box)
-            detections.append((x1, y1, x2 - x1, y2 - y1))
+        for box in results[0].boxes:  # x1, y1, x2, y2
+            bbox = box.xyxy[0]
+            confidence = float(box.conf)
+            class_id = int(box.cls)
+            label = ArtifactType(class_id)
+            x1, y1, x2, y2 = map(int, bbox)
+            detections.append({"bbox": (x1, y1, x2 - x1, y2 - y1),"class": label, "confidence": confidence})
 
         
         self.artifact_found_ = len(detections) > 0
 
         
-        for (x, y, w, h) in detections:
+        for det in detections:
+            x, y, w, h = det["bbox"]
+            label = det["class"]
+            conf = det["confidence"]
+            roughDistance = self.roughDistanceOfArtifact(label, h)
             cv2.rectangle(image, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            cv2.putText(image, f"{label} with confidence {conf:.2f}% and at {roughDistance:.2f}", (x-30, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            self.rough_localise_artifact(det)
+
+        self.rough_publish_artifact_markers()
 
         
         image_detection_message = self.cv_bridge_.cv2_to_imgmsg(image, encoding="bgr8")
@@ -423,10 +535,40 @@ class CaveExplorer(Node):
 
         if self.artifact_found_:
             self.get_logger().info('Artifact found!')
-            self.localise_artifact()
+            
+
+    def roughDistanceOfArtifact(self, label, pixelHeight):
+        image_width = 720
+        image_height = 480
+        h_fov = 2.0944  # stolen straight from the <gazebo reference="camera_link"> if i actually had time i would do the camera calibration with the ros thing.
+        fx = image_width / (2 * math.tan(h_fov / 2))
+        v_fov = 2 * math.atan((image_height / image_width) * math.tan(h_fov / 2))
+        fy = image_height / (2 * math.tan(v_fov / 2))
+        distance = (fy * ARTIFACT_HEIGHTS[label]) / pixelHeight
+
+        return distance
+    
+    def detection_to_point(self, distance, x, y, w, h):
+        image_width = 720
+        image_height = 480
+        h_fov = 2.0944
+        u = x + w / 2
+        v = y + h / 2
+        fx = image_width / (2 * math.tan(h_fov / 2))
+        v_fov = 2 * math.atan((image_height / image_width) * math.tan(h_fov / 2))
+        fy = image_height / (2 * math.tan(v_fov / 2))
+        cx = image_width / 2
+        cy = image_height / 2
+        x_cam = (u - cx) / fx
+        y_cam = (v - cy) / fy
+        z_cam = 1.0
+        norm = math.sqrt(x_cam**2 + y_cam**2 + z_cam**2)
+        x_cam, y_cam, z_cam = x_cam / norm, y_cam / norm, z_cam / norm
+        p_cam = np.array([x_cam * distance, y_cam * distance, z_cam * distance])
+        return p_cam
 
 
-    def localise_artifact(self):
+    def rough_localise_artifact(self, det=None): #just going to split this in half. This one uses the height of the pixel to figure out rough distance and location. Need to use depth sens for other one
         """
         INCOMPLETE:
         Compute the location of the artifact
@@ -436,17 +578,95 @@ class CaveExplorer(Node):
         """
 
         # Current location of the robot
-        robot_pose = self.get_pose_2d()
-
-        if robot_pose == None:
-            self.get_logger().warn(f'localise_artifact: robot_pose is None.')
+        try:
+            camera_pose = self.tf_buffer.lookup_transform('map', 'camera_rgb_optical_frame', rclpy.time.Time())
+        except TransformException as ex:
+            self.get_logger().error(f'Could not transform camera: {ex}')
             return
 
+        if camera_pose == None:
+            self.get_logger().warn(f'localise_artifact: robot_pose is None.')
+            return
+        
+        label = det["class"]
+        x, y, w, h = det["bbox"]
+
+        
+        dist = self.roughDistanceOfArtifact(label, h)
+
+        pointCamera = self.detection_to_point(dist, x, y, w, h)
+
+
+        trans = np.array([
+            camera_pose.transform.translation.x,
+            camera_pose.transform.translation.y,
+            camera_pose.transform.translation.z
+        ])
+
+        
+        quat = camera_pose.transform.rotation
+        rot = R.from_quat([quat.x, quat.y, quat.z, quat.w]).as_matrix()
+            
+        p_world = rot @ pointCamera + trans
+        
         # Compute the location of the artifact
         # This is currently INCOMPLETE
         point = Point()
-        point.x = robot_pose.x
-        point.y = robot_pose.y
+        point.x = p_world[0]
+        point.y = p_world[1]
+        point.z = 1.0
+
+        # Save it
+        self.rough_artifact_locations_.append(point)
+        
+
+
+    def localise_artifact(self, det=None):
+        """
+        INCOMPLETE:
+        Compute the location of the artifact
+        Save it to a list, publish rviz marker
+        This version just uses the robot location rather than the artifact location
+        You can find other examples of using RViz markers in the previous assignments template code
+        """
+
+        # Current location of the robot
+        try:
+            camera_pose = self.tf_buffer.lookup_transform('map', 'camera_rgb_optical_frame', rclpy.time.Time())
+        except TransformException as ex:
+            self.get_logger().error(f'Could not transform camera: {ex}')
+            return
+
+        if camera_pose == None:
+            self.get_logger().warn(f'localise_artifact: robot_pose is None.')
+            return
+        
+        label = det["class"]
+        x, y, w, h = det["bbox"]
+
+        
+        dist = self.roughDistanceOfArtifact(label, h)
+
+        pointCamera = self.detection_to_point(dist, x, y, w, h)
+
+
+        trans = np.array([
+            camera_pose.transform.translation.x,
+            camera_pose.transform.translation.y,
+            camera_pose.transform.translation.z
+        ])
+
+        
+        quat = camera_pose.transform.rotation
+        rot = R.from_quat([quat.x, quat.y, quat.z, quat.w]).as_matrix()
+            
+        p_world = rot @ pointCamera + trans
+        
+        # Compute the location of the artifact
+        # This is currently INCOMPLETE
+        point = Point()
+        point.x = p_world[0]
+        point.y = p_world[1]
         point.z = 1.0
 
         # Save it
@@ -465,6 +685,18 @@ class CaveExplorer(Node):
         marker_array = MarkerArray()
         marker_array.markers = [self.marker_artifacts_]
         self.marker_pub_.publish(marker_array)
+
+    def rough_publish_artifact_markers(self):
+        """ Publish the artifact location markers"""
+
+        # Update the locations
+        self.rough_marker_artifacts_.points = self.rough_artifact_locations_
+
+        # Create and publish the MarkerArray
+        marker_array = MarkerArray()
+        marker_array.markers = [self.rough_marker_artifacts_]
+        self.rough_marker_pub_.publish(marker_array)
+        self.rough_artifact_locations_ = []
 
 
     def planner_go_to_pose2d(self, pose2d):
@@ -663,8 +895,10 @@ class CaveExplorer(Node):
             self.planner_type_ = PlannerType.GO_TO_FIRST_ARTIFACT
         elif not self.returned_home_:
             self.planner_type_ = PlannerType.RETURN_HOME
-        else:
+        elif not self.frontierClusters_ == []: 
             self.planner_type_ = PlannerType.SELECT_AND_GO_TO_FRONTIER
+        else:
+            self.planner_type_ = PlannerType.RANDOM_GOAL
 
         #######################################################
         # Execute the planner by calling the relevant method
