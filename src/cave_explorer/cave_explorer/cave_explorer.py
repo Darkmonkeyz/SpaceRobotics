@@ -23,6 +23,9 @@ from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
 from scipy.spatial.transform import Rotation as R 
 
+from collections import deque
+
+
 from visualization_msgs.msg import Marker
 from visualization_msgs.msg import MarkerArray
 from std_msgs.msg import ColorRGBA
@@ -74,8 +77,8 @@ class ArtifactType(Enum):
 ARTIFACT_HEIGHTS = { #height in meters from blender and mars_cave.sdf
     ArtifactType.MUSHROOM: 2.03,
     ArtifactType.ICECASTLE: 1.51,
-    ArtifactType.URANIUM: 2.84,
-    ArtifactType.HOWARD: 2.86,
+    ArtifactType.URANIUM: 2.67, #changing height from 2.84 since its buried
+    ArtifactType.HOWARD: 3.00, #chaning height from 2.86 to slightly taller since the alien floats
     ArtifactType.SNOWBALL: 1.6,
 }
 
@@ -97,6 +100,14 @@ class CaveExplorer(Node):
         # Variables/Flags for mapping
         self.xlim_ = [0.0, 0.0]
         self.ylim_ = [0.0, 0.0]
+
+        self.obstacle_map_ = None
+
+        self.updated_cells_ = set()
+
+        self.distance_transform_map_ = None
+
+        self.bridge = CvBridge()
 
         # Variables/Flags for perception
         self.artifact_found_ = False
@@ -184,6 +195,10 @@ class CaveExplorer(Node):
 
         self.frontier_pub = self.create_publisher(MarkerArray, "frontier_markers", 10) #frontierPublisher
 
+        self.dt_pub = self.create_publisher(OccupancyGrid, 'distance_transform', 10)
+
+        self.dt_image_pub = self.create_publisher(Image, 'distance_transform_image', 1)
+
 
         # Prepare image processing
         self.image_detections_pub_ = self.create_publisher(Image, 'detections_image', 1)
@@ -268,23 +283,163 @@ class CaveExplorer(Node):
         map_resolution = map_msg.info.resolution
         map_height = map_msg.info.height
         map_width = map_msg.info.width
-
-        data = np.array(map_msg.data).reshape((map_height,  map_width)) #added to actually get map info
         res = map_msg.info.resolution
-
+        
+        
         # Set current limits
         self.xlim_ = [map_origin[0], map_origin[0]+map_width*map_resolution]
         self.ylim_ = [map_origin[1], map_origin[1]+map_height*map_resolution]
 
+
+        """begininnign of hell // fool errand just use open cv next time moron :(
+
+        new_map = np.array(map_msg.data, dtype=np.int8).reshape((map_height, map_width))
+
+        if self.obstacle_map_ is None or self.obstacle_map_.size == 0:
+            # First callback, just store the map
+            self.obstacle_map_ = new_map.copy()
+            self.distance_transform_map_ = np.full_like(new_map, np.nan, dtype=float)
+            oldmap = self.obstacle_map_.copy()
+            self.distance_transform_map_[self.obstacle_map_ == 1] = 0
+            self.last_origin_x = map_msg.info.origin.position.x
+            self.last_origin_y = map_msg.info.origin.position.y
+            self.uber_nuke_distance_update()
+            return
+        else:
+            oldmap = self.obstacle_map_.copy()
+            old_h, old_w = oldmap.shape
+
+            dx = map_msg.info.origin.position.x - self.last_origin_x
+            dy = map_msg.info.origin.position.y - self.last_origin_y
+
+            pad_left   = int(max(0, -dx / res))  
+            pad_right  = int(max(0, map_width - old_w - pad_left))
+            pad_top    = int(max(0, -dy / res))  
+            pad_bottom = int(max(0, map_height - old_h - pad_top))
+
+            if pad_top > 0 or pad_bottom > 0 or pad_left > 0 or pad_right > 0:
+                oldmap = np.pad(
+                    oldmap,
+                    ((pad_top, pad_bottom), (pad_left, pad_right)),
+                    mode='constant',
+                    constant_values=-1
+                )
+                if self.distance_transform_map_ is None:
+                    self.distance_transform_map_ = np.full_like(oldmap, np.nan, dtype=float)
+                else:
+                    self.distance_transform_map_ = np.pad(
+                        self.distance_transform_map_,
+                        ((pad_top, pad_bottom), (pad_left, pad_right)),
+                        mode='constant',
+                        constant_values=np.nan
+                    )
+
+            new_h, new_w = new_map.shape
+            if oldmap.shape[0] > new_h:
+                oldmap = oldmap[:new_h, :]
+                self.distance_transform_map_ = self.distance_transform_map_[:new_h, :]
+            if oldmap.shape[1] > new_w:
+                oldmap = oldmap[:, :new_w]
+                self.distance_transform_map_ = self.distance_transform_map_[:, :new_w]
+                
+        
+
+        changed_indices = np.argwhere(oldmap != self.obstacle_map_) # checking for changes between map messages
+        self.updated_cells_ = set(map(tuple, changed_indices))"""
+        
+        self.obstacle_map_ = np.array(map_msg.data).reshape((map_height,  map_width)) #added to actually get map info
+
+
+        
+        self.uber_nuke_distance_update()
+        #self.incremental_distance_update()
+        self.display_distance_map(map_resolution, map_width, map_height, map_origin)
+
+        
+
+        
         # self.get_logger().warn('Map received:')
         # self.get_logger().warn(f'  xlim = [{self.xlim_[0]:.2f}, {self.xlim_[1]:.2f}]')
         # self.get_logger().warn(f'  ylim = [{self.ylim_[0]:.2f}, {self.ylim_[1]:.2f}]')
 
-        frontiers = self.detect_frontiers(data, res, map_origin)
+        frontiers = self.detect_frontiers(self.obstacle_map_, res, map_origin)
         #self.get_logger().warn(f"Detected {len(frontiers)} frontier points") #debugging step
         frontierClusters = self.cluster_frontiers(frontiers)
         self.publish_frontier_markers(frontierClusters)
         self.frontierClusters_ = frontierClusters 
+
+    #distance transform 
+    def uber_nuke_distance_update(self): #way better to monkey brain it since at least it works
+        binary_map = np.zeros_like(self.obstacle_map_, dtype=np.uint8)
+        binary_map[self.obstacle_map_ == 100] = 255 # obstacle
+        binary_map[self.obstacle_map_ == -1] = 255  # unknown
+        dt_cv = cv2.distanceTransform(255 - binary_map, cv2.DIST_L2, 3) #who whould have guessed premade distance transform way better than me :)
+        self.distance_transform_map_ = dt_cv
+
+    ''' #some garbage incremental distance transform thing :(
+    def incremental_distance_update(self):
+        """Update self.distance_transform_map_ using only the updated cells."""
+        if not self.updated_cells_:
+            return
+
+        rows, cols = self.obstacle_map_.shape
+        dt = self.distance_transform_map_
+        queue = deque()
+
+        for (i, j) in self.updated_cells_:
+            if self.obstacle_map_[i, j] == 1:
+                dt[i, j] = 0
+                queue.append((i, j))
+            else:
+                if np.isnan(dt[i, j]):
+                    dt[i, j] = np.inf
+                
+
+        
+        directions = [(-1,0,1),(1,0,1),(0,-1,1),(0,1,1), (-1,-1,1.414),(-1,1,1.414),(1,-1,1.414),(1,1,1.414)]
+        while queue:
+            i, j = queue.popleft()
+            for di, dj, dv in directions:
+                ni, nj = i + di, j + dj
+                if 0 <= ni < rows and 0 <= nj < cols:
+                    new_dist = dt[i, j] + dv
+                    if np.isnan(dt[ni, nj]) or new_dist < dt[ni, nj]:
+                        dt[ni, nj] = new_dist
+                        queue.append((ni, nj))
+
+        self.updated_cells_.clear()
+    '''
+        
+
+    #show distance transform
+    def display_distance_map(self, res, width, height, origin):
+        max_dist = np.max(self.distance_transform_map_)
+        min_dist = np.min(self.distance_transform_map_)
+   
+        dt_normalized = (self.distance_transform_map_ - min_dist) / (max_dist - min_dist) * 100.0
+        dt_normalized[np.isnan(self.distance_transform_map_)] = -1
+        dt_normalized = dt_normalized.astype(np.int8)
+
+        grid_msg = OccupancyGrid()
+
+        grid_msg.header.frame_id = "map" 
+
+        grid_msg.info.resolution = res
+        grid_msg.info.width = width
+        grid_msg.info.height = height
+        grid_msg.info.origin.position.x = origin[0]
+        grid_msg.info.origin.position.y = origin[1]
+        grid_msg.info.origin.position.z = 0.0
+        grid_msg.info.origin.orientation.w = 1.0
+        grid_msg.data = dt_normalized.flatten().tolist()
+        
+        self.dt_pub.publish(grid_msg)
+        # dt_map = self.distance_transform_map_.copy()
+        # dt_map[np.isnan(dt_map)] = 0
+        # dt_image = (dt_map / np.nanmax(dt_map) * 255).astype(np.uint8)
+        # dt_image = (self.distance_transform_map_ / np.nanmax(self.distance_transform_map_) * 255).astype(np.uint8)
+        # img_msg = self.bridge.cv2_to_imgmsg(dt_image, encoding="mono8")
+        # self.dt_image_pub.publish(img_msg)
 
 
     def detect_frontiers(self, data: np.ndarray, res: float, origin: list):
@@ -301,7 +456,7 @@ class CaveExplorer(Node):
     
 
     def cluster_frontiers(self, frontier_points):
-        # if len(frontier_points) == 0:
+        """# if len(frontier_points) == 0:
         #     return []
 
         # clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(frontier_points)
@@ -319,7 +474,7 @@ class CaveExplorer(Node):
         #         "centroid": centroid
         #     })
         # #self.get_logger().warn(f"Detected {len(clusters)} clusters")
-        # return clusters
+        # return clusters"""
         neighbour_radius = 1
         cutOff = 5
         if len(frontier_points) == 0:
