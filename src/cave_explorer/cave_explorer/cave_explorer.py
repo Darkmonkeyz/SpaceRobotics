@@ -72,6 +72,7 @@ class PlannerType(Enum):
     CLOSERANGE_INSPECTION = 7
     NOSCOPE360 = 8
     HEADSNAP = 9
+    TRAVELSALESMAN = 10
     
 
 class ArtifactType(Enum):
@@ -185,7 +186,11 @@ class CaveExplorer(Node):
         # Remember the artifact locations
 
         #travlin sales guy
+        self.travelsalesmanplan_ = None
         self.travelling_sales_points_ = []
+
+        self.widest = None
+        self.narrowest = None
         # Array of type geometry_msgs.Point
         self.artifacts_ = []
 
@@ -538,6 +543,69 @@ class CaveExplorer(Node):
         # dt_image = (self.distance_transform_map_ / np.nanmax(self.distance_transform_map_) * 255).astype(np.uint8)
         # img_msg = self.bridge.cv2_to_imgmsg(dt_image, encoding="mono8")
         # self.dt_image_pub.publish(img_msg)
+        dt = self.distance_transform_map_.copy()
+        dt[dt <= 0] = np.nan 
+
+        try:
+            max_idx = np.unravel_index(np.nanargmax(dt), dt.shape)
+            min_idx = np.unravel_index(np.nanargmin(dt), dt.shape)
+        except ValueError:
+            return
+
+        def index_to_world(ix, iy):
+            wx = origin[0] + ix * res
+            wy = origin[1] + iy * res
+            return wx, wy
+
+        self.widest = index_to_world(max_idx[1], max_idx[0])
+        self.narrowest = index_to_world(min_idx[1], min_idx[0])
+
+        
+        lap = (
+            np.roll(dt, 1, axis=0)
+            + np.roll(dt, -1, axis=0)
+            + np.roll(dt, 1, axis=1)
+            + np.roll(dt, -1, axis=1)
+            - 4 * dt
+        )
+        saddle_mask = np.logical_and(lap > -0.05, lap < 0.05)
+        saddle_indices = np.argwhere(saddle_mask)
+        saddle_points = [index_to_world(x, y) for y, x in saddle_indices[::100]] 
+
+        
+        if not hasattr(self, "dt_marker_pub"):
+            self.dt_marker_pub = self.create_publisher(MarkerArray, "distance_map_extrema", 10)
+
+        marker_array = MarkerArray()
+        marker_id = 0
+
+        def make_marker(x, y, color, ns):
+            nonlocal marker_id
+            m = Marker()
+            m.header.frame_id = "map"
+            m.header.stamp = self.get_clock().now().to_msg()
+            m.id = marker_id
+            marker_id += 1
+            m.ns = ns
+            m.type = Marker.SPHERE
+            m.action = Marker.ADD
+            m.pose.position.x = x
+            m.pose.position.y = y
+            m.pose.position.z = 0.1
+            m.scale.x = 0.25
+            m.scale.y = 0.25
+            m.scale.z = 0.25
+            m.color.r, m.color.g, m.color.b, m.color.a = color
+            return m
+
+        
+        marker_array.markers.append(make_marker(*self.narrowest, (1.0, 0.0, 0.0, 1.0), "narrowest"))
+        marker_array.markers.append(make_marker(*self.widest, (0.0, 1.0, 0.0, 1.0), "widest"))
+
+        for (x, y) in saddle_points:
+            marker_array.markers.append(make_marker(x, y, (0.0, 0.0, 1.0, 0.3), "saddle"))
+
+        self.dt_marker_pub.publish(marker_array)
 
 
     def detect_frontiers(self, data: np.ndarray, res: float, origin: list):
@@ -1136,7 +1204,7 @@ class CaveExplorer(Node):
         y = artifact["point"].y
         if not self.location_too_close_to_logged_artifacts(x, y, 3, artifact["label"]):
             self.artifacts_.append(artifact)
-            self.travelling_sales_points_.append(self.get_pose_2d)
+            self.travelling_sales_points_.append(self.get_pose_2d().x, self.get_pose_2d().y)
 
         
 
@@ -1568,6 +1636,28 @@ class CaveExplorer(Node):
 
         return ordered_indices
 
+    def planner_travelsalesman(self):
+        if self.travelsalesmanplan_ == None:
+            self.travelling_sales_points_.append(self.widest)
+            self.travelling_sales_points_.append(self.narrowest)
+            self.travelsalesmanplan_ = self.plan_tsp_order(self.travelling_sales_points_)
+            self.current_tsp_index = 0  
+
+        tsp_order = self.travelsalesmanplan_
+        point_idx = tsp_order[self.current_tsp_index]
+        goal_point = self.travelling_sales_points_[point_idx]
+
+
+        goal_pose2d = Pose2D(
+            x=goal_point[0],
+            y=goal_point[1],
+            theta=random.uniform(0, 2*math.pi)
+        )
+
+        self.planner_go_to_pose2d(goal_pose2d)
+
+        # advance index for next call
+        self.current_tsp_index = (self.current_tsp_index + 1) % len(self.travelling_sales_points_)
 
 
 
@@ -1651,7 +1741,7 @@ class CaveExplorer(Node):
         elif self.closeRangeInspection_ == True :
             self.planner_type_ = PlannerType.CLOSERANGE_INSPECTION
         else:
-            self.planner_type_ = PlannerType.RANDOM_WALK
+            self.planner_type_ = PlannerType.TRAVELSALESMAN
 
         #######################################################
         # Execute the planner by calling the relevant method
@@ -1665,6 +1755,8 @@ class CaveExplorer(Node):
             self.planner_return_home()
         elif self.planner_type_ == PlannerType.RANDOM_WALK:
             self.planner_random_walk()
+        elif self.planner_type_ == PlannerType.TRAVELSALESMAN:
+            self.planner_travelsalesman()
         elif self.planner_type_ == PlannerType.RANDOM_GOAL:
             self.planner_random_goal()
         elif self.planner_type_ == PlannerType.SELECT_AND_GO_TO_FRONTIER:
