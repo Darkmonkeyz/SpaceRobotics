@@ -107,6 +107,9 @@ class CaveExplorer(Node):
 
         self.distance_transform_map_ = None
 
+        self.map_resolution_ = None
+        self.map_origin_ = []
+
         self.bridge = CvBridge()
 
         # Variables/Flags for perception
@@ -199,6 +202,8 @@ class CaveExplorer(Node):
 
         self.dt_image_pub = self.create_publisher(Image, 'distance_transform_image', 1)
 
+        self.debug_marker_pub_ = self.create_publisher(MarkerArray, 'frontier_candidate_points', 1)
+
 
         # Prepare image processing
         self.image_detections_pub_ = self.create_publisher(Image, 'detections_image', 1)
@@ -278,6 +283,11 @@ class CaveExplorer(Node):
         """New map received, so update x and y limits"""
 
         # Extract data from message
+        self.map_origin_ = [
+            map_msg.info.origin.position.x,
+            map_msg.info.origin.position.y,
+        ]
+        self.map_resolution_ = map_msg.info.resolution
         map_origin = [map_msg.info.origin.position.x, 
                       map_msg.info.origin.position.y]
         map_resolution = map_msg.info.resolution
@@ -368,6 +378,10 @@ class CaveExplorer(Node):
         self.publish_frontier_markers(frontierClusters)
         self.frontierClusters_ = frontierClusters 
 
+    
+
+    
+
     #distance transform 
     def uber_nuke_distance_update(self): #way better to monkey brain it since at least it works
         binary_map = np.zeros_like(self.obstacle_map_, dtype=np.uint8)
@@ -410,7 +424,60 @@ class CaveExplorer(Node):
         self.updated_cells_.clear()
     '''
         
+    def get_obstacle_value_at(self, x_m: float, y_m: float):
+        """
+        Get the value of the obstacle map at world coordinates (x_m, y_m) in meters.
+        Returns:
+            int: obstacle value (e.g., 0 = free, 100 = obstacle, -1 = unknown)
+            or None if out of bounds
+        """
+        if self.obstacle_map_ is None:
+            self.get_logger().warn("Obstacle map not initialized yet.")
+            return None
 
+        res = self.map_resolution_
+        origin_x, origin_y = self.map_origin_
+
+        # Convert world coordinates to grid indices
+        j = int((x_m - origin_x) / res)  # column
+        i = int((y_m - origin_y) / res)  # row
+
+        if not (0 <= i < self.obstacle_map_.shape[0] and 0 <= j < self.obstacle_map_.shape[1]):
+            return None  # out of bounds
+
+        return int(self.obstacle_map_[i, j])
+
+
+    def get_distance_value_at(self, x_m: float, y_m: float):
+        """
+        Get the distance transform value (in meters) at world coordinates (x_m, y_m).
+        Returns:
+            float: distance to nearest obstacle in meters
+            or None if out of bounds or undefined
+        """
+        if self.distance_transform_map_ is None:
+            self.get_logger().warn("Distance transform not initialized yet.")
+            return None
+
+        res = self.map_resolution_
+        origin_x, origin_y = self.map_origin_
+
+        j = int((x_m - origin_x) / res)
+        i = int((y_m - origin_y) / res)
+
+        if not (0 <= i < self.distance_transform_map_.shape[0] and
+                0 <= j < self.distance_transform_map_.shape[1]):
+            return None
+
+        dt_value = float(self.distance_transform_map_[i, j])
+        if np.isnan(dt_value):
+            return None
+
+        # Each pixel represents 'res' meters; distanceTransform outputs pixel units
+        return dt_value * res
+
+
+    
     #show distance transform
     def display_distance_map(self, res, width, height, origin):
         max_dist = np.max(self.distance_transform_map_)
@@ -476,7 +543,7 @@ class CaveExplorer(Node):
         # #self.get_logger().warn(f"Detected {len(clusters)} clusters")
         # return clusters"""
         neighbour_radius = 1
-        cutOff = 5
+        cutOff = 8
         if len(frontier_points) == 0:
             return []
 
@@ -531,10 +598,183 @@ class CaveExplorer(Node):
             theta = math.pi/2
         )
         self.planner_go_to_pose2d(goal_pose2d)
-        
+
+    def planner_choose_and_go_to_frontier_but_good(self, search_radius=2.0, num_samples=100, res = 0.3): #too lazy to actually grab map.info thing
+        roboPose = self.get_pose_2d()
+        clusters = self.frontierClusters_
+
+        selectedCluster = self.select_frontier_goal(clusters, roboPose)
+        if selectedCluster is None:
+            return
+        candidates = []
+        cx, cy = selectedCluster["centroid"]
+
+        marker_array = MarkerArray() #for visualisation of point cloud since its not behaving
+        marker_id = 0
+
+        for _ in range(num_samples): #gaussian splatter like from A1 yipee!!
+            dx = np.random.normal(0, search_radius)
+            dy = np.random.normal(0, search_radius)
+            x = cx + dx
+            y = cy + dy
+            i=int(x*res)
+            j=int(y*res)
+            clusterCellx = (cx *res)
+            clusterCelly = (cy *res)
+
+            reason = None
+            passed = True
+
+            obs_val = self.get_obstacle_value_at(x, y)
+            if obs_val is None:
+                passed = False
+                reason = 'out_of_bounds'
+            elif obs_val >= 100 or obs_val == -1:
+                passed = False
+                reason = 'invalid_terrain'
+
+            # elif not self._bresenham_clear((j, i), (clusterCelly, clusterCellx)):
+            #     passed = False
+            #     reason = 'blocked_los'
+
+            if passed:
+                dt_val = self.get_distance_value_at(x, y)
+                if dt_val is None:
+                    passed = False
+                    reason = 'no_dt'
+                else:
+                    candidates.append((x, y, dt_val))
+
+            m = Marker()
+            m.header.frame_id = "map"
+            m.header.stamp = self.get_clock().now().to_msg()
+            m.id = marker_id
+            marker_id += 1
+            m.type = Marker.SPHERE
+            m.action = Marker.ADD
+            m.scale.x = 0.1
+            m.scale.y = 0.1
+            m.scale.z = 0.1
+            m.pose.position.x = x
+            m.pose.position.y = y
+            m.pose.position.z = 0.0
+
+            if passed:
+                m.color.r = 0.0
+                m.color.g = 1.0
+                m.color.b = 0.0
+                m.color.a = 1.0
+            else:
+                m.color.r = 1.0
+                m.color.g = 0.0
+                m.color.b = 0.0
+                m.color.a = 1.0
+
+            marker_array.markers.append(m)
+            if not passed:
+                t = Marker()
+                t.header.frame_id = "map"
+                t.header.stamp = self.get_clock().now().to_msg()
+                t.id = marker_id
+                marker_id += 1
+                t.type = Marker.TEXT_VIEW_FACING
+                t.action = Marker.ADD
+                t.scale.z = 0.25 
+                t.pose.position.x = x
+                t.pose.position.y = y
+                t.pose.position.z = 0.15  
+                t.color.r = 1.0
+                t.color.g = 1.0
+                t.color.b = 1.0
+                t.color.a = 1.0
+                t.text = reason
+                marker_array.markers.append(t)
 
         
+        self.debug_marker_pub_.publish(marker_array)
+
+        
+        if not candidates:
+            goal_x, goal_y = cx, cy
+            self.get_logger().info('Fallback to centroid')
+        else:
+            goal_x, goal_y, _ = max(candidates, key=lambda c: c[2])
+            self.get_logger().info('ChoosingActualheatmap good')
+
+        goal_pose2d = Pose2D(
+            x=goal_x,
+            y=goal_y,
+            theta=math.pi/2
+        )
+
+        self.planner_go_to_pose2d(goal_pose2d)
     
+    def _bresenham_clear(self, start, end):
+        """
+        Bresenham's line algorithm to check if the path from start to end is free.
+        start, end: (row, col) = (map_y, map_x)
+        Returns True if all cells along the line are free (value < 100)
+        """
+        y0, x0 = start
+        y1, x1 = end
+
+        dx = abs(x1 - x0)
+        dy = abs(y1 - y0)
+        sx = 1 if x0 < x1 else -1
+        sy = 1 if y0 < y1 else -1
+
+        err = dx - dy
+        while True:
+            if not (0 <= y0 < self.obstacle_map_.shape[0] and 0 <= x0 < self.obstacle_map_.shape[1]):
+                return False  # out of bounds
+
+            if self.obstacle_map_[y0, x0] >= 100:
+                return False  # obstacle hit
+
+            if x0 == x1 and y0 == y1:
+                break
+
+            e2 = 2 * err
+            if e2 > -dy:
+                err -= dy
+                x0 += sx
+            if e2 < dx:
+                err += dx
+                y0 += sy
+        return True
+    
+    def save_obstacle_map_debug(self, filename="obstacle_map_debug.png"): #im stupid so i got gpt to save me an image :)
+        """
+        Saves the obstacle map as an image for debugging.
+        Shows how axes align with your (x, y) and (i, j) logic.
+        """
+        if self.obstacle_map_ is None:
+            self.get_logger().warn("No obstacle map available to save.")
+            return
+
+        # Normalize to 0-255 for display
+        normalized = np.zeros_like(self.obstacle_map_, dtype=np.uint8)
+        normalized[self.obstacle_map_ == -1] = 128  # Unknown = gray
+        normalized[self.obstacle_map_ == 0] = 255   # Free = white
+        normalized[self.obstacle_map_ >= 100] = 0   # Obstacle = black
+
+        # Draw coordinate axes
+        img = cv2.cvtColor(normalized, cv2.COLOR_GRAY2BGR)
+
+        h, w = img.shape[:2]
+        cv2.arrowedLine(img, (0, h//2), (w-1, h//2), (0, 0, 255), 1, tipLength=0.02)  # X-axis (cols)
+        cv2.arrowedLine(img, (w//2, h-1), (w//2, 0), (0, 255, 0), 1, tipLength=0.02)  # Y-axis (rows)
+
+        # Label axes
+        cv2.putText(img, "X (columns, j)", (10, h//2 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+        cv2.putText(img, "Y (rows, i)", (w//2 + 10, 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+
+        # Save flipped and unflipped versions so you can compare
+        cv2.imwrite(filename, img)
+        cv2.imwrite(filename.replace(".png", "_flipped.png"), cv2.flip(img, 0))
+        self.get_logger().info(f"Saved obstacle map debug image to {filename} and flipped version.")
 
     def publish_frontier_markers(self, clusters):
         marker_array = MarkerArray()
@@ -1048,8 +1288,8 @@ class CaveExplorer(Node):
         # Update this logic as you see fit!
         if not self.reached_first_artifact_:
             self.planner_type_ = PlannerType.GO_TO_FIRST_ARTIFACT
-        elif not self.returned_home_:
-            self.planner_type_ = PlannerType.RETURN_HOME
+        #elif not self.returned_home_:
+            #self.planner_type_ = PlannerType.RETURN_HOME
         elif not self.frontierClusters_ == []: 
             self.planner_type_ = PlannerType.SELECT_AND_GO_TO_FRONTIER
         else:
@@ -1070,7 +1310,7 @@ class CaveExplorer(Node):
         elif self.planner_type_ == PlannerType.RANDOM_GOAL:
             self.planner_random_goal()
         elif self.planner_type_ == PlannerType.SELECT_AND_GO_TO_FRONTIER:
-            self.planner_choose_and_go_to_frontier()
+            self.planner_choose_and_go_to_frontier_but_good()
         else:
             self.get_logger().error('No valid planner selected')
             self.destroy_node()
