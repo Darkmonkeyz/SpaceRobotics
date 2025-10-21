@@ -24,6 +24,9 @@ from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
 from scipy.spatial.transform import Rotation as R 
 from action_msgs.msg import GoalStatus
+from ortools.constraint_solver import pywrapcp, routing_enums_pb2
+
+import heapq
 
 
 from collections import deque
@@ -180,6 +183,9 @@ class CaveExplorer(Node):
         self.rough_marker_pub_ = self.create_publisher(MarkerArray, 'rough_marker_array_artifacts', 10)
 
         # Remember the artifact locations
+
+        #travlin sales guy
+        self.travelling_sales_points_ = []
         # Array of type geometry_msgs.Point
         self.artifacts_ = []
 
@@ -778,6 +784,10 @@ class CaveExplorer(Node):
 
         return True
     
+
+
+
+    
     def _bresenham_clear_world_lenient(self, start_m, end_m):
         """
         Bresenham's line algorithm in world coordinates (meters).
@@ -1126,6 +1136,9 @@ class CaveExplorer(Node):
         y = artifact["point"].y
         if not self.location_too_close_to_logged_artifacts(x, y, 3, artifact["label"]):
             self.artifacts_.append(artifact)
+            self.travelling_sales_points_.append(self.get_pose_2d)
+
+        
 
         self.publish_artifact_markers()
             
@@ -1463,6 +1476,100 @@ class CaveExplorer(Node):
             theta = random.uniform(0, 2*math.pi)
         )
         self.planner_go_to_pose2d(goal_pose2d)
+
+
+
+    
+
+    def plan_tsp_order(self, points_world):
+        """
+        Given a list of world-coordinate points, compute the optimal visiting order
+        based on actual traversable paths through the occupancy map.
+
+        Args:
+            points_world: list of (x, y) in world coordinates
+
+        Returns:
+            ordered_indices: list of point indices in visit order
+        """
+
+        if self.obstacle_map_ is None:
+            self.get_logger().error("No map data available!")
+            return []
+
+        def world_to_grid(x, y):
+            gx = int((x - self.map_origin_[0]) / self.map_resolution_)
+            gy = int((y - self.map_origin_[1]) / self.map_resolution_)
+            gx = np.clip(gx, 0, self.obstacle_map_.shape[1]-1)
+            gy = np.clip(gy, 0, self.obstacle_map_.shape[0]-1)
+            return (gx, gy)
+
+        points_grid = [world_to_grid(x, y) for (x, y) in points_world]
+
+        def is_free(x, y):
+            if 0 <= x < self.obstacle_map_.shape[1] and 0 <= y < self.obstacle_map_.shape[0]:
+                return self.obstacle_map_[y, x] == 0
+            return False
+
+        def neighbors(x, y):
+            for dx, dy in [(-1,0),(1,0),(0,-1),(0,1)]:
+                nx, ny = x+dx, y+dy
+                if is_free(nx, ny):
+                    yield (nx, ny)
+
+        def astar(start, goal):
+            """Return cost of shortest path using A* (grid-based)."""
+            open_set = [(0, start)]
+            g_score = {start: 0}
+            gx, gy = goal
+            while open_set:
+                f, (x, y) = heapq.heappop(open_set)
+                if (x, y) == goal:
+                    return g_score[(x, y)]
+                for nx, ny in neighbors(x, y):
+                    ng = g_score[(x, y)] + np.hypot(nx - x, ny - y)
+                    if (nx, ny) not in g_score or ng < g_score[(nx, ny)]:
+                        g_score[(nx, ny)] = ng
+                        f_score = ng + np.hypot(nx - gx, ny - gy)
+                        heapq.heappush(open_set, (f_score, (nx, ny)))
+            return np.inf  
+
+        n = len(points_grid)
+        cost_matrix = np.zeros((n, n))
+        for i in range(n):
+            for j in range(n):
+                if i == j:
+                    cost_matrix[i, j] = 0
+                else:
+                    cost = astar(points_grid[i], points_grid[j])
+                    cost_matrix[i, j] = cost
+
+        manager = pywrapcp.RoutingIndexManager(n, 1, 0)
+        routing = pywrapcp.RoutingModel(manager)
+
+        def distance_callback(from_idx, to_idx):
+            return int(cost_matrix[manager.IndexToNode(from_idx)][manager.IndexToNode(to_idx)] * 100)  # scale to int
+        transit_idx = routing.RegisterTransitCallback(distance_callback)
+        routing.SetArcCostEvaluatorOfAllVehicles(transit_idx)
+
+        params = pywrapcp.DefaultRoutingSearchParameters()
+        params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
+        solution = routing.SolveWithParameters(params)
+
+        if not solution:
+            self.get_logger().warn("TSP solver failed, returning original order.")
+            return list(range(n))
+
+        index = routing.Start(0)
+        ordered_indices = []
+        while not routing.IsEnd(index):
+            ordered_indices.append(manager.IndexToNode(index))
+            index = solution.Value(routing.NextVar(index))
+
+        return ordered_indices
+
+
+
 
     def planner_random_goal(self):
         """Go to a random location out of a predefined set"""
