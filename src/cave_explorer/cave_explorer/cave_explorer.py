@@ -1204,7 +1204,7 @@ class CaveExplorer(Node):
         y = artifact["point"].y
         if not self.location_too_close_to_logged_artifacts(x, y, 3, artifact["label"]):
             self.artifacts_.append(artifact)
-            self.travelling_sales_points_.append(self.get_pose_2d().x, self.get_pose_2d().y)
+            self.travelling_sales_points_.append((self.get_pose_2d().x, self.get_pose_2d().y))
 
         
 
