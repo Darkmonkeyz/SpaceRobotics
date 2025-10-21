@@ -23,6 +23,7 @@ from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
 from scipy.spatial.transform import Rotation as R 
 
+
 from collections import deque
 
 
@@ -65,6 +66,7 @@ class PlannerType(Enum):
     SELECT_AND_GO_TO_FRONTIER = 6
     CLOSERANGE_INSPECTION = 7
     NOSCOPE360 = 8
+    HEADSNAP = 9
     
 
 class ArtifactType(Enum):
@@ -617,10 +619,7 @@ class CaveExplorer(Node):
             dy = np.random.normal(0, search_radius)
             x = cx + dx
             y = cy + dy
-            i=int(x*res)
-            j=int(y*res)
-            clusterCellx = (cx *res)
-            clusterCelly = (cy *res)
+            
 
             reason = None
             passed = True
@@ -633,9 +632,9 @@ class CaveExplorer(Node):
                 passed = False
                 reason = 'invalid_terrain'
 
-            # elif not self._bresenham_clear((j, i), (clusterCelly, clusterCellx)):
-            #     passed = False
-            #     reason = 'blocked_los'
+            elif not self._bresenham_clear_world((x, y), (cx, cy)):
+                passed = False
+                reason = 'blocked_los'
 
             if passed:
                 dt_val = self.get_distance_value_at(x, y)
@@ -709,14 +708,21 @@ class CaveExplorer(Node):
 
         self.planner_go_to_pose2d(goal_pose2d)
     
-    def _bresenham_clear(self, start, end):
+    def _bresenham_clear_world(self, start_m, end_m):
         """
-        Bresenham's line algorithm to check if the path from start to end is free.
-        start, end: (row, col) = (map_y, map_x)
+        Bresenham's line algorithm in world coordinates (meters).
+        start_m, end_m: (x, y) in meters
         Returns True if all cells along the line are free (value < 100)
         """
-        y0, x0 = start
-        y1, x1 = end
+        res = self.map_resolution_
+        origin_x = self.map_origin_[0]
+        origin_y = self.map_origin_[1]
+
+        # Convert meters to cell indices
+        y0 = int((start_m[1] - origin_y) / res)
+        x0 = int((start_m[0] - origin_x) / res)
+        y1 = int((end_m[1] - origin_y) / res)
+        x1 = int((end_m[0] - origin_x) / res)
 
         dx = abs(x1 - x0)
         dy = abs(y1 - y0)
@@ -724,16 +730,21 @@ class CaveExplorer(Node):
         sy = 1 if y0 < y1 else -1
 
         err = dx - dy
+
         while True:
+            # Bounds check
             if not (0 <= y0 < self.obstacle_map_.shape[0] and 0 <= x0 < self.obstacle_map_.shape[1]):
-                return False  # out of bounds
+                return False
 
+            # Obstacle check
             if self.obstacle_map_[y0, x0] >= 100:
-                return False  # obstacle hit
+                return False
 
+            # Goal reached
             if x0 == x1 and y0 == y1:
                 break
 
+            # Bresenham step
             e2 = 2 * err
             if e2 > -dy:
                 err -= dy
@@ -741,6 +752,7 @@ class CaveExplorer(Node):
             if e2 < dx:
                 err += dx
                 y0 += sy
+
         return True
     
     def save_obstacle_map_debug(self, filename="obstacle_map_debug.png"): #im stupid so i got gpt to save me an image :)
@@ -930,7 +942,13 @@ class CaveExplorer(Node):
 
         if self.artifact_found_:
             self.get_logger().info('Artifact found!')
+            self.cancel_current_goal()
             
+    def should_check_detection():
+        if (1==0):
+            return False
+
+        return True
 
     def roughDistanceOfArtifact(self, label, pixelHeight):
         image_width = 720
@@ -1014,7 +1032,14 @@ class CaveExplorer(Node):
         # Save it
         self.rough_artifact_locations_.append(point)
         
-
+    def location_too_close_to_logged_artifacts(self, locationX, locationY, radius):
+        for point in self.artifact_locations_:
+            dx = locationX - point.x
+            dy = locationY - point.y
+            distance = (dx**2 + dy**2)**0.5
+            if distance < radius:
+                return True
+        return False
 
     def localise_artifact(self, det=None):
         """
@@ -1293,7 +1318,7 @@ class CaveExplorer(Node):
         elif not self.frontierClusters_ == []: 
             self.planner_type_ = PlannerType.SELECT_AND_GO_TO_FRONTIER
         else:
-            self.planner_type_ = PlannerType.RANDOM_GOAL
+            self.planner_type_ = PlannerType.RANDOM_WALK
 
         #######################################################
         # Execute the planner by calling the relevant method
@@ -1310,6 +1335,8 @@ class CaveExplorer(Node):
         elif self.planner_type_ == PlannerType.RANDOM_GOAL:
             self.planner_random_goal()
         elif self.planner_type_ == PlannerType.SELECT_AND_GO_TO_FRONTIER:
+            self.planner_choose_and_go_to_frontier_but_good()
+        elif self.planner_type_ == PlannerType.HEADSNAP:
             self.planner_choose_and_go_to_frontier_but_good()
         else:
             self.get_logger().error('No valid planner selected')
