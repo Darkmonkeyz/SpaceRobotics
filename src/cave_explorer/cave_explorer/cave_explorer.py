@@ -18,6 +18,7 @@ from nav_msgs.msg import OccupancyGrid
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from sensor_msgs.msg import Image
+from sensor_msgs.msg import LaserScan
 from tf2_ros import TransformException
 from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
@@ -113,6 +114,7 @@ class CaveExplorer(Node):
         self.map_origin_ = []
 
         self.bridge = CvBridge()
+        
 
         # Variables/Flags for perception
         self.artifact_found_ = False
@@ -123,6 +125,11 @@ class CaveExplorer(Node):
         self.planner_type_ = PlannerType.ERROR
         self.reached_first_artifact_ = False
         self.returned_home_ = False
+        #Variable for behavior
+        self.closeRangeInspection_ = False
+        self.artifactInView_ = False
+        self.viewTicker = 0
+        #
 
         # Marker for artifact locations
         # See https://wiki.ros.org/rviz/DisplayTypes/Marker
@@ -173,10 +180,11 @@ class CaveExplorer(Node):
 
         # Remember the artifact locations
         # Array of type geometry_msgs.Point
-        self.artifact_locations_ = []
+        self.artifacts_ = []
 
-        self.rough_artifact_locations_ = []
+        self.rough_artifacts_ = []
 
+        self.artifactSightingOfInterest_ = None
         # Initialise CvBridge
         self.cv_bridge_ = CvBridge()
 
@@ -207,6 +215,13 @@ class CaveExplorer(Node):
         self.debug_marker_pub_ = self.create_publisher(MarkerArray, 'frontier_candidate_points', 1)
 
 
+        self.depth_subscriber = self.create_subscription(Image, '/camera/depth/image', self.depth_callback, 10)
+
+        self.lidar_subscriber = self.create_subscription(LaserScan, '/scan', self.lidar_callback, 10)
+
+        self.latest_depth_image = None
+        self.latest_point_cloud = None
+
         # Prepare image processing
         self.image_detections_pub_ = self.create_publisher(Image, 'detections_image', 1)
         self.declare_parameter('computer_vision_model_filename', rclpy.Parameter.Type.STRING)
@@ -218,6 +233,13 @@ class CaveExplorer(Node):
 
         # Timer for main loop
         self.main_loop_timer_ = self.create_timer(0.2, self.main_loop)
+
+
+    def depth_callback(self, msg):
+        self.latest_depth_image = msg
+
+    def lidar_callback(self, msg):
+        self.latest_point_cloud = msg
     
     def get_pose_2d(self):
         """Get the 2d pose of the robot"""
@@ -245,7 +267,7 @@ class CaveExplorer(Node):
         else: 
             pose.theta = wrap_angle(-2. * math.acos(qw))
 
-        self.get_logger().warn(f'Pose: {pose}')
+        #self.get_logger().warn(f'Pose: {pose}')
 
         return pose
     
@@ -755,6 +777,62 @@ class CaveExplorer(Node):
 
         return True
     
+    def _bresenham_clear_world_lenient(self, start_m, end_m):
+        """
+        Bresenham's line algorithm in world coordinates (meters).
+        start_m, end_m: (x, y) in meters
+        Returns True if all cells along the line **excluding** the last quarter are free.
+        """
+        res = self.map_resolution_
+        origin_x = self.map_origin_[0]
+        origin_y = self.map_origin_[1]
+
+        # Convert meters to cell indices
+        y0 = int((start_m[1] - origin_y) / res)
+        x0 = int((start_m[0] - origin_x) / res)
+        y1 = int((end_m[1] - origin_y) / res)
+        x1 = int((end_m[0] - origin_x) / res)
+
+        dx = abs(x1 - x0)
+        dy = abs(y1 - y0)
+        sx = 1 if x0 < x1 else -1
+        sy = 1 if y0 < y1 else -1
+
+        err = dx - dy
+
+        # Calculate total steps
+        total_steps = max(dx, dy)
+        # Determine steps for last quarter
+        skip_steps = int(total_steps * 0.75)
+
+        steps_taken = 0
+
+        while True:
+            # Bounds check
+            if not (0 <= y0 < self.obstacle_map_.shape[0] and 0 <= x0 < self.obstacle_map_.shape[1]):
+                return False
+
+            # Obstacle check
+            if self.obstacle_map_[y0, x0] >= 100:
+                return False
+
+            # Stop before last quarter
+            if steps_taken >= total_steps - skip_steps:
+                break
+
+            # Bresenham step
+            e2 = 2 * err
+            if e2 > -dy:
+                err -= dy
+                x0 += sx
+            if e2 < dx:
+                err += dx
+                y0 += sy
+
+            steps_taken += 1
+
+        return True
+    
     def save_obstacle_map_debug(self, filename="obstacle_map_debug.png"): #im stupid so i got gpt to save me an image :)
         """
         Saves the obstacle map as an image for debugging.
@@ -923,7 +1001,8 @@ class CaveExplorer(Node):
 
         
         self.artifact_found_ = len(detections) > 0
-
+        
+        
         
         for det in detections:
             x, y, w, h = det["bbox"]
@@ -934,21 +1013,173 @@ class CaveExplorer(Node):
             cv2.putText(image, f"{label} with confidence {conf:.2f}% and at {roughDistance:.2f}", (x-30, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             self.rough_localise_artifact(det)
 
-        self.rough_publish_artifact_markers()
-
+        
+        
         
         image_detection_message = self.cv_bridge_.cv2_to_imgmsg(image, encoding="bgr8")
         self.image_detections_pub_.publish(image_detection_message)
 
         if self.artifact_found_:
-            self.get_logger().info('Artifact found!')
-            self.cancel_current_goal()
+            for artifact in self.rough_artifacts_:
+                self.artifactInView_ = True
+                if self.artifactSightingOfInterest_ == None:
+                    self.artifactSightingOfInterest_ = artifact
+
+                if self.planner_type_ == PlannerType.SELECT_AND_GO_TO_FRONTIER and self.should_check_detection(artifact):
+                    self.closeRangeInspection_ = True
+                    self.cancel_current_goal()
+                    self.artifactSightingOfInterest_ = artifact
+
+                    continue
+                elif self.planner_type_ == PlannerType.CLOSERANGE_INSPECTION and self.should_check_detection(artifact) and artifact["label"] == self.artifactSightingOfInterest_["label"]:
+                    self.artifactSightingOfInterest_ = artifact
+        else:
+            self.artifactInView_ = False
+        
             
-    def should_check_detection():
-        if (1==0):
+                    
+
+        self.rough_publish_artifact_markers()
+
+
+    def planner_do_close_range_inspection(self):
+        selfPose = self.get_pose_2d()
+
+        num_samples = 1000
+        artifactToCheck = self.artifactSightingOfInterest_
+        if artifactToCheck is None:
+            return
+        candidates = []
+        cx = artifactToCheck["point"].x 
+        cy = artifactToCheck["point"].y
+
+        for _ in range(num_samples): #gaussian splatter like from A1 yipee!! except now its just circle
+            theta = np.random.uniform(0, 2 * np.pi)
+            # Sample a radius uniformly within the circle
+            r = 3
+            # Convert polar to cartesian coordinates
+            dx = r * np.cos(theta)
+            dy = r * np.sin(theta)
+            x = cx + dx
+            y = cy + dy
+            
+
+            reason = None
+            passed = True
+
+            obs_val = self.get_obstacle_value_at(x, y)
+            if obs_val is None:
+                passed = False
+                reason = 'out_of_bounds'
+            elif obs_val >= 100 or obs_val == -1:
+                passed = False
+                reason = 'invalid_terrain'
+
+            elif not self._bresenham_clear_world_lenient((x, y), (cx, cy)):
+                passed = False
+                reason = 'blocked_los'
+
+            if passed:
+                dt_val = self.get_distance_value_at(x, y)
+                if dt_val is None:
+                    passed = False
+                    reason = 'no_dt'
+                else:
+                    candidates.append((x, y, dt_val))
+        
+        if not candidates:
+            goal_x, goal_y = cx, cy
+            self.planner_go_to_pose2d(self.justlookingAtPoint(goal_x, goal_y, artifactToCheck["point"].x, artifactToCheck["point"].y))
+            self.get_logger().info('Fallback to centroid')
+        else:
+            goal_x, goal_y, _ = max(candidates, key=lambda c: c[2])
+            self.planner_go_to_pose2d(self.justlookingAtPoint(goal_x, goal_y, artifactToCheck["point"].x, artifactToCheck["point"].y))
+            self.get_logger().info('ChoosingActualheatmap good')
+
+        delta_x = selfPose.x - goal_x
+        delta_y = selfPose.y - goal_y
+        delta_theta = selfPose.theta - self.justlookingAtPoint(goal_x, goal_y, artifactToCheck["point"].x, artifactToCheck["point"].y).theta
+
+        if ((delta_x**2 +delta_y**2)**1 < 0.5 and abs(delta_theta) < 10 and self.artifactInView_ == True):
+            self.planner_type_ = PlannerType.SELECT_AND_GO_TO_FRONTIER
+            self.addArtifact(self.artifactSightingOfInterest_)
+            self.closeRangeInspection_ = False
+            
+        if (self.artifactInView_ == False):
+            self.viewTicker = self.viewTicker + 1
+        else:
+            self.viewTicker = 0
+
+        if self.viewTicker > 15:
+            self.planner_type_ = PlannerType.SELECT_AND_GO_TO_FRONTIER
+            self.closeRangeInspection_ = False
+
+
+
+        
+
+        
+    def addArtifact(self, artifact):
+        x = artifact["point"].x
+        y = artifact["point"].y
+        if not self.location_too_close_to_logged_artifacts(x, y, 3, artifact["label"]):
+            self.artifacts_.append(artifact)
+
+        self.publish_artifact_markers()
+            
+
+        
+
+    def halfwayPoint(self, startPointX, startPointY, endPointX, endPointY):
+        mid_x = (startPointX + endPointX) / 2
+        mid_y = (startPointY + endPointY) / 2
+
+        delta_x = endPointX - mid_x
+        delta_y = endPointY - mid_y
+        heading = math.atan2(delta_y, delta_x)
+
+        return Pose2D(x=mid_x, y=mid_y, theta=heading)
+
+    def justlookingAtPoint(self, startPointX, startPointY, endPointX, endPointY):
+        delta_x = endPointX - startPointX
+        delta_y = endPointY - startPointY
+        heading = math.atan2(delta_y, delta_x)
+
+        return Pose2D(x=startPointX, y=startPointY, theta=heading)
+    
+    def pointAtDistance(self, startPoint, endPoint, distance=3.0):
+        dx = endPoint.x - startPoint.x
+        dy = endPoint.y - startPoint.y
+        total_distance = math.hypot(dx, dy)
+    
+        if total_distance == 0:
+            return Pose2D(x=startPoint.x, y=startPoint.y, theta=0.0)
+        ratio = distance / total_distance
+        new_x = startPoint.x + dx * ratio
+        new_y = startPoint.y + dy * ratio
+
+        heading = math.atan2(dy, dx)
+        
+        return Pose2D(x=new_x, y=new_y, theta=heading)
+
+                
+    def should_check_detection(self, artifact):
+        x = artifact["point"].x
+        y = artifact["point"].y
+        label = artifact["label"]
+        if (self.location_too_close_to_logged_artifacts(x, y, 18, label)):
             return False
 
         return True
+    
+    def location_too_close_to_logged_artifacts(self, locationX, locationY, radius, type):
+        for artifact in self.artifacts_:
+            dx = locationX - artifact["point"].x
+            dy = locationY - artifact["point"].y
+            distance = (dx**2 + dy**2)**0.5
+            if distance < radius and type == artifact["label"]:
+                return True
+        return False
 
     def roughDistanceOfArtifact(self, label, pixelHeight):
         image_width = 720
@@ -1001,6 +1232,8 @@ class CaveExplorer(Node):
             self.get_logger().warn(f'localise_artifact: robot_pose is None.')
             return
         
+        
+
         label = det["class"]
         x, y, w, h = det["bbox"]
 
@@ -1030,16 +1263,10 @@ class CaveExplorer(Node):
         point.z = 1.0
 
         # Save it
-        self.rough_artifact_locations_.append(point)
+        self.rough_artifacts_.append({"point": point, "label": label})
+    
         
-    def location_too_close_to_logged_artifacts(self, locationX, locationY, radius):
-        for point in self.artifact_locations_:
-            dx = locationX - point.x
-            dy = locationY - point.y
-            distance = (dx**2 + dy**2)**0.5
-            if distance < radius:
-                return True
-        return False
+    
 
     def localise_artifact(self, det=None):
         """
@@ -1090,7 +1317,7 @@ class CaveExplorer(Node):
         point.z = 1.0
 
         # Save it
-        self.artifact_locations_.append(point)
+        self.artifacts_.append({"point": point, "label": label})
 
         # Publish the markers
         self.publish_artifact_markers()
@@ -1099,7 +1326,7 @@ class CaveExplorer(Node):
         """ Publish the artifact location markers"""
 
         # Update the locations
-        self.marker_artifacts_.points = self.artifact_locations_
+        self.marker_artifacts_.points = [artifact["point"] for artifact in self.artifacts_]
 
         # Create and publish the MarkerArray
         marker_array = MarkerArray()
@@ -1110,13 +1337,13 @@ class CaveExplorer(Node):
         """ Publish the artifact location markers"""
 
         # Update the locations
-        self.rough_marker_artifacts_.points = self.rough_artifact_locations_
+        self.rough_marker_artifacts_.points = [artifact["point"] for artifact in self.rough_artifacts_]
 
         # Create and publish the MarkerArray
         marker_array = MarkerArray()
         marker_array.markers = [self.rough_marker_artifacts_]
         self.rough_marker_pub_.publish(marker_array)
-        self.rough_artifact_locations_ = []
+        self.rough_artifacts_ = []
 
 
     def planner_go_to_pose2d(self, pose2d):
@@ -1174,27 +1401,9 @@ class CaveExplorer(Node):
 
 
     #code to stop current goal. For behaviour switching.
-    def cancel_current_goal(self):
-        if hasattr(self, 'send_goal_future_') and self.send_goal_future_ is not None:
-            self.get_logger().warn("Cancelling current goal...")
+    def cancel_current_goal(self):      
+        self.planner_go_to_pose2d(self.get_pose_2d())
 
-            cancel_future = self.nav2_action_client_.cancel_goal_async(self.get_result_future_._goal_handle)
-
-            cancel_future.add_done_callback(self._goal_cancelled_callback)
-        else:
-            self.get_logger().warn("No active goal to cancel.")
-
-    
-
-    def _goal_cancelled_callback(self, future):
-        cancel_response = future.result()
-        if len(cancel_response.goals_canceling) > 0:
-            self.get_logger().info("Goal successfully cancelled.")
-        else:
-            self.get_logger().warn("No goals were cancelled (maybe already done?).")
-
-        # Treat it as if goal was reached
-        self.goal_reached_callback(MockFuture(success=True))
     
     
 
@@ -1315,8 +1524,10 @@ class CaveExplorer(Node):
             self.planner_type_ = PlannerType.GO_TO_FIRST_ARTIFACT
         #elif not self.returned_home_:
             #self.planner_type_ = PlannerType.RETURN_HOME
-        elif not self.frontierClusters_ == []: 
+        elif not self.frontierClusters_ == [] and not self.closeRangeInspection_ == True: 
             self.planner_type_ = PlannerType.SELECT_AND_GO_TO_FRONTIER
+        elif self.closeRangeInspection_ == True :
+            self.planner_type_ = PlannerType.CLOSERANGE_INSPECTION
         else:
             self.planner_type_ = PlannerType.RANDOM_WALK
 
@@ -1338,11 +1549,13 @@ class CaveExplorer(Node):
             self.planner_choose_and_go_to_frontier_but_good()
         elif self.planner_type_ == PlannerType.HEADSNAP:
             self.planner_choose_and_go_to_frontier_but_good()
+        elif self.planner_type_ == PlannerType.CLOSERANGE_INSPECTION:
+            self.planner_do_close_range_inspection()
         else:
             self.get_logger().error('No valid planner selected')
             self.destroy_node()
 
-
+    
         #######################################################
 
 def main():
