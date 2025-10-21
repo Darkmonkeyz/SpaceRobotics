@@ -23,6 +23,7 @@ from tf2_ros import TransformException
 from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
 from scipy.spatial.transform import Rotation as R 
+from action_msgs.msg import GoalStatus
 
 
 from collections import deque
@@ -1098,9 +1099,9 @@ class CaveExplorer(Node):
 
         delta_x = selfPose.x - goal_x
         delta_y = selfPose.y - goal_y
-        delta_theta = selfPose.theta - self.justlookingAtPoint(goal_x, goal_y, artifactToCheck["point"].x, artifactToCheck["point"].y).theta
+        
 
-        if ((delta_x**2 +delta_y**2)**1 < 0.5 and abs(delta_theta) < 10 and self.artifactInView_ == True):
+        if ((delta_x**2 +delta_y**2)**0.5 < 1 and self.artifactInView_ == True):
             self.planner_type_ = PlannerType.SELECT_AND_GO_TO_FRONTIER
             self.addArtifact(self.artifactSightingOfInterest_)
             self.closeRangeInspection_ = False
@@ -1113,6 +1114,7 @@ class CaveExplorer(Node):
         if self.viewTicker > 15:
             self.planner_type_ = PlannerType.SELECT_AND_GO_TO_FRONTIER
             self.closeRangeInspection_ = False
+            self.viewTicker = 0
 
 
 
@@ -1391,12 +1393,25 @@ class CaveExplorer(Node):
 
         self.get_logger().info(f'{feedback.distance_remaining:.2f} m remaining')
 
-    def goal_reached_callback(self, future):
-        """The requested goal has been reached"""
 
+
+    def goal_reached_callback(self, future):
+        """Handle the result of the navigation goal."""
         result = future.result().result
-        self.get_logger().info(f'Goal reached!')
-        self.ready_for_next_goal_ = True
+        status = future.result().status
+
+        if status == GoalStatus.STATUS_SUCCEEDED:
+            self.get_logger().info('Goal reached successfully!')
+            self.ready_for_next_goal_ = True
+        elif status == GoalStatus.STATUS_CANCELED:
+            self.get_logger().warn('Goal was canceled before reaching the target.')
+            self.ready_for_next_goal_ = False
+        elif status == GoalStatus.STATUS_ABORTED:
+            self.get_logger().error('Goal was aborted (navigation failed).')
+            self.ready_for_next_goal_ = True
+        else:
+            self.get_logger().warn(f'Goal ended with unknown status: {status}')
+            self.ready_for_next_goal_ = False
 
 
 
